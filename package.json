@@ -1,0 +1,17 @@
+{
+  "name": "pt-scribe-backend",
+  "version": "1.0.0",
+  "description": "Backend proxy for Qalam PT Scribe — keeps API keys server-side instead of in the browser.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}
