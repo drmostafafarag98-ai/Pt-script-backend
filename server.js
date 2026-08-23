@@ -147,6 +147,73 @@ app.post('/api/ai', checkClinicSecret, async (req, res) => {
   }
 });
 
+// ---- Config for Supabase (clinic calendar database) ----
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+
+// ---- GET /api/appointments?start=ISO&end=ISO ----
+app.get('/api/appointments', checkClinicSecret, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  }
+  const { start, end } = req.query;
+  if (!start || !end) {
+    return res.status(400).json({ error: 'Missing start or end query params.' });
+  }
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(
+      start
+    )}&start_time=lte.${encodeURIComponent(end)}&order=start_time.asc`;
+    const upstream = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Appointments GET error:', err);
+    res.status(500).json({ error: 'Failed to load appointments: ' + err.message });
+  }
+});
+
+// ---- POST /api/appointments ----
+// Body: { patientName, startTime, endTime, doctorColor, doctorName }
+app.post('/api/appointments', checkClinicSecret, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  }
+  const { patientName, startTime, endTime, doctorColor, doctorName } = req.body || {};
+  if (!patientName || !startTime || !endTime) {
+    return res.status(400).json({ error: 'Missing patientName, startTime, or endTime.' });
+  }
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments`;
+    const upstream = await fetch(url, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        patient_name: patientName,
+        start_time: startTime,
+        end_time: endTime,
+        doctor_color: doctorColor || null,
+        doctor_name: doctorName || null,
+      }),
+    });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Appointments POST error:', err);
+    res.status(500).json({ error: 'Failed to book appointment: ' + err.message });
+  }
+});
+
 // ---- Health check (for Render, and for you to confirm it's alive) ----
 app.get('/', (req, res) => {
   res.send('Qalam PT Scribe backend is running.');
