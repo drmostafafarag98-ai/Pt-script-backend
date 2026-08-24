@@ -351,7 +351,16 @@ app.post('/api/doctors/checkin', async (req, res) => {
       body: JSON.stringify({ email, name: name || email, status: 'pending' }),
     });
     const inserted = await insertRes.json();
-    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+    if (!insertRes.ok) {
+      console.error('Doctor insert failed:', insertRes.status, inserted);
+      return res.status(500).json({ error: 'Could not create doctor record: ' + (inserted.message || JSON.stringify(inserted)).slice(0, 300) });
+    }
+    const doctorRow = Array.isArray(inserted) ? inserted[0] : inserted;
+    if (!doctorRow || !doctorRow.email) {
+      console.error('Doctor insert returned unexpected shape:', inserted);
+      return res.status(500).json({ error: 'Doctor record was created but the server response was malformed.' });
+    }
+    res.json(doctorRow);
   } catch (err) {
     console.error('Doctor checkin error:', err);
     res.status(500).json({ error: 'Check-in failed: ' + err.message });
