@@ -70,6 +70,27 @@ async function requireApprovedDoctor(req, res, next) {
       error: doctor ? 'Your access is pending approval from the clinic owner.' : 'You are not registered at this clinic yet.',
     });
   }
+  if (doctor.role === 'secretary') {
+    return res.status(403).json({ error: 'Secretary accounts only have access to the calendar.' });
+  }
+  req.doctor = doctor;
+  next();
+}
+
+// Any approved role (doctor, owner, or secretary) — used for calendar
+// endpoints, since secretaries need to view/book appointments too.
+async function requireApprovedAny(req, res, next) {
+  const token = extractBearerToken(req);
+  const email = await verifyGoogleToken(token);
+  if (!email) {
+    return res.status(401).json({ error: 'Sign in with Google required.' });
+  }
+  const doctor = await lookupDoctor(email);
+  if (!doctor || doctor.status !== 'approved') {
+    return res.status(403).json({
+      error: doctor ? 'Your access is pending approval from the clinic owner.' : 'You are not registered at this clinic yet.',
+    });
+  }
   req.doctor = doctor;
   next();
 }
@@ -166,7 +187,7 @@ app.post('/api/ai', requireApprovedDoctor, async (req, res) => {
   }
 });
 
-app.get('/api/appointments', requireApprovedDoctor, async (req, res) => {
+app.get('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
   if (!start || !end) return res.status(400).json({ error: 'Missing start or end query params.' });
@@ -181,7 +202,7 @@ app.get('/api/appointments', requireApprovedDoctor, async (req, res) => {
   }
 });
 
-app.post('/api/appointments', requireApprovedDoctor, async (req, res) => {
+app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { patientName, startTime, endTime, doctorColor, doctorName } = req.body || {};
   if (!patientName || !startTime || !endTime) return res.status(400).json({ error: 'Missing patientName, startTime, or endTime.' });
@@ -420,6 +441,8 @@ app.get('/api/doctors', requireOwnerDoctor, async (req, res) => {
 
 app.post('/api/doctors/:email/approve', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { role } = req.body || {};
+  const assignedRole = role === 'secretary' ? 'secretary' : role === 'owner' ? 'owner' : 'doctor';
   try {
     const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`;
     const upstream = await fetch(url, {
@@ -429,7 +452,7 @@ app.post('/api/doctors/:email/approve', requireOwnerDoctor, async (req, res) => 
         Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ status: 'approved', approved_at: new Date().toISOString() }),
+      body: JSON.stringify({ status: 'approved', role: assignedRole, approved_at: new Date().toISOString() }),
     });
     res.status(upstream.status).json({ ok: upstream.ok });
   } catch (err) {
