@@ -248,6 +248,62 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- GET /api/appointments/:id/notes ----
+app.get('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}&select=notes,patient_name`;
+    const upstream = await fetch(url, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await upstream.json();
+    const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    res.json({ patientName: row ? row.patient_name : null, notes: (row && row.notes) || [] });
+  } catch (err) {
+    console.error('Appointment notes GET error:', err);
+    res.status(500).json({ error: 'Failed to load notes: ' + err.message });
+  }
+});
+
+// ---- POST /api/appointments/:id/notes ---- (append one note)
+app.post('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { text } = req.body || {};
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Missing note text.' });
+  try {
+    const getUrl = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}&select=notes`;
+    const getRes = await fetch(getUrl, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await getRes.json();
+    const existingNotes = (Array.isArray(rows) && rows[0] && rows[0].notes) || [];
+    const newNote = {
+      text: text.trim(),
+      author: req.doctor.name || req.doctor.email,
+      at: new Date().toISOString(),
+    };
+    const updatedNotes = [...existingNotes, newNote];
+    const patchUrl = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
+    const patchRes = await fetch(patchUrl, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ notes: updatedNotes }),
+    });
+    if (!patchRes.ok) {
+      const errBody = await patchRes.text();
+      throw new Error(errBody);
+    }
+    res.json({ notes: updatedNotes });
+  } catch (err) {
+    console.error('Appointment notes POST error:', err);
+    res.status(500).json({ error: 'Failed to add note: ' + err.message });
+  }
+});
+
 app.post('/api/sessions', requireApprovedDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { id, patientName, sessionDate, sessionType, transcript, note } = req.body || {};
