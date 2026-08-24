@@ -109,6 +109,22 @@ async function requireOwnerDoctor(req, res, next) {
   next();
 }
 
+// Owner or secretary — used for calendar-color management, since
+// secretaries handle the schedule day-to-day but shouldn't approve staff.
+async function requireOwnerOrSecretary(req, res, next) {
+  const token = extractBearerToken(req);
+  const email = await verifyGoogleToken(token);
+  if (!email) {
+    return res.status(401).json({ error: 'Sign in with Google required.' });
+  }
+  const doctor = await lookupDoctor(email);
+  if (!doctor || doctor.status !== 'approved' || (doctor.role !== 'owner' && doctor.role !== 'secretary')) {
+    return res.status(403).json({ error: 'Owner or secretary access required.' });
+  }
+  req.doctor = doctor;
+  next();
+}
+
 app.post(
   '/api/transcribe',
   requireApprovedDoctor,
@@ -436,6 +452,43 @@ app.get('/api/doctors', requireOwnerDoctor, async (req, res) => {
   } catch (err) {
     console.error('Doctors GET error:', err);
     res.status(500).json({ error: 'Failed to load doctors: ' + err.message });
+  }
+});
+
+// Lighter-weight roster for color assignment — owner OR secretary, and
+// only exposes approved doctors/owners (not pending/removed accounts).
+app.get('/api/doctors/colors', requireOwnerOrSecretary, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/doctors?status=eq.approved&role=in.(doctor,owner)&order=name.asc`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Doctor colors GET error:', err);
+    res.status(500).json({ error: 'Failed to load doctor colors: ' + err.message });
+  }
+});
+
+app.post('/api/doctors/:email/color', requireOwnerOrSecretary, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { color } = req.body || {};
+  if (!color) return res.status(400).json({ error: 'Missing color.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ color }),
+    });
+    res.status(upstream.status).json({ ok: upstream.ok });
+  } catch (err) {
+    console.error('Doctor color update error:', err);
+    res.status(500).json({ error: 'Failed to update color: ' + err.message });
   }
 });
 
