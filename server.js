@@ -340,7 +340,11 @@ app.post('/api/sessions', requireApprovedDoctor, async (req, res) => {
 app.get('/api/sessions', requireApprovedDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/sessions?order=created_at.desc`;
+    const { patientName, order } = req.query;
+    let url = `${SUPABASE_URL}/rest/v1/sessions?order=${order === 'asc' ? 'created_at.asc' : 'created_at.desc'}`;
+    if (patientName) {
+      url += `&patient_name=ilike.${encodeURIComponent('%' + patientName + '%')}`;
+    }
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
