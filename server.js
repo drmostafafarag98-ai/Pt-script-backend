@@ -464,6 +464,44 @@ app.post('/api/doctors/checkin', async (req, res) => {
   }
 });
 
+// ---- POST /api/doctors/me/name ----
+// Lets a signed-in doctor (any status — pending or approved) set their own
+// display name at any time, so they're never stuck showing as their raw
+// email. The email itself is taken from the verified token, never from
+// client input, so nobody can rename another doctor's row.
+app.post('/api/doctors/me/name', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const token = extractBearerToken(req);
+  const email = await verifyGoogleToken(token);
+  if (!email) return res.status(401).json({ error: 'Sign in with Google required.' });
+  const { name } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Missing name.' });
+  try {
+    const existing = await lookupDoctor(email);
+    if (!existing) return res.status(404).json({ error: 'You are not registered at this clinic yet — sign in first.' });
+    const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(email)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      console.error('Name update failed:', upstream.status, data);
+      return res.status(500).json({ error: 'Could not update name.' });
+    }
+    res.json(Array.isArray(data) ? data[0] : data);
+  } catch (err) {
+    console.error('Doctor name update error:', err);
+    res.status(500).json({ error: 'Failed to update name: ' + err.message });
+  }
+});
+
 app.post('/api/doctors/bootstrap-owner', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   if (!OWNER_SECRET) return res.status(500).json({ error: 'Server is missing OWNER_SECRET.' });
