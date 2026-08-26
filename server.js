@@ -151,7 +151,7 @@ app.post(
   }
 );
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '20mb' }));
 
 app.post('/api/ai', requireApprovedDoctor, async (req, res) => {
   const { systemPrompt, userContent, maxTokens, provider } = req.body || {};
@@ -429,6 +429,116 @@ app.get('/api/sessions', requireApprovedDoctor, async (req, res) => {
   } catch (err) {
     console.error('Sessions GET error:', err);
     res.status(500).json({ error: 'Failed to load sessions: ' + err.message });
+  }
+});
+
+// ---- Session images (Supabase Storage — cross-device, unlike the old
+// device-only IndexedDB storage) ----
+const IMAGE_BUCKET = 'session-images';
+
+app.post('/api/sessions/:id/images', requireApprovedDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { base64Data, mimeType, filename } = req.body || {};
+  if (!base64Data || !mimeType) return res.status(400).json({ error: 'Missing base64Data or mimeType.' });
+  try {
+    const bytes = Buffer.from(base64Data, 'base64');
+    const ext = (mimeType.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, '');
+    const safeName = (filename || 'image').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `${req.params.id}/${Date.now()}_${safeName}.${ext}`;
+    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${IMAGE_BUCKET}/${path}`;
+    const upstream = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': mimeType,
+        'x-upsert': 'false',
+      },
+      body: bytes,
+    });
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      console.error('Image upload failed:', data);
+      return res.status(500).json({ error: data.message || 'Failed to upload image.' });
+    }
+    res.json({ ok: true, path });
+  } catch (err) {
+    console.error('Image upload error:', err);
+    res.status(500).json({ error: 'Failed to upload image: ' + err.message });
+  }
+});
+
+app.get('/api/sessions/:id/images', requireApprovedDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const listUrl = `${SUPABASE_URL}/storage/v1/object/list/${IMAGE_BUCKET}`;
+    const listRes = await fetch(listUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ prefix: `${req.params.id}/`, limit: 200, sortBy: { column: 'created_at', order: 'asc' } }),
+    });
+    const files = await listRes.json();
+    if (!listRes.ok) {
+      console.error('Image list failed:', files);
+      return res.status(500).json({ error: 'Failed to list images.' });
+    }
+    if (!Array.isArray(files) || files.length === 0) return res.json([]);
+    // Batch-sign all paths in one call rather than one request per image.
+    const signUrl = `${SUPABASE_URL}/storage/v1/object/sign/${IMAGE_BUCKET}`;
+    const signRes = await fetch(signUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expiresIn: 3600,
+        paths: files.map(f => `${req.params.id}/${f.name}`),
+      }),
+    });
+    const signed = await signRes.json();
+    if (!signRes.ok) {
+      console.error('Image sign failed:', signed);
+      return res.status(500).json({ error: 'Failed to sign image URLs.' });
+    }
+    const result = files.map((f, i) => ({
+      path: `${req.params.id}/${f.name}`,
+      filename: f.name,
+      url: signed[i] && signed[i].signedURL ? `${SUPABASE_URL}/storage/v1${signed[i].signedURL}` : null,
+      createdAt: f.created_at,
+    }));
+    res.json(result);
+  } catch (err) {
+    console.error('Image list error:', err);
+    res.status(500).json({ error: 'Failed to list images: ' + err.message });
+  }
+});
+
+app.delete('/api/sessions/:id/images', requireApprovedDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { path } = req.body || {};
+  if (!path || !path.startsWith(`${req.params.id}/`)) return res.status(400).json({ error: 'Invalid or missing path.' });
+  try {
+    const deleteUrl = `${SUPABASE_URL}/storage/v1/object/${IMAGE_BUCKET}`;
+    const upstream = await fetch(deleteUrl, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ prefixes: [path] }),
+    });
+    if (!upstream.ok) {
+      const errData = await upstream.json();
+      console.error('Image delete failed:', errData);
+      return res.status(500).json({ error: 'Failed to delete image.' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Image delete error:', err);
+    res.status(500).json({ error: 'Failed to delete image: ' + err.message });
   }
 });
 
