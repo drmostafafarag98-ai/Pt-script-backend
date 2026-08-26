@@ -250,10 +250,13 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
 });
 
 // ---- POST /api/whatsapp/send-reminder ----
-// The "official" path (WhatsApp Business API via Twilio). Inactive until
-// TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM are set in
-// Render — set those once your Twilio WhatsApp sender + Meta template
-// approval are complete, and this starts working with no code changes.
+// The genuinely free path: Meta's own WhatsApp Cloud API, direct — no BSP
+// (no Twilio, no 360dialog, no monthly subscription or per-message markup
+// on top of Meta's own small per-message rate). Inactive until
+// META_WHATSAPP_PHONE_NUMBER_ID and META_WHATSAPP_ACCESS_TOKEN are set in
+// Render — set those once your Meta Business verification + message
+// template approval are complete, and this starts working with no code
+// changes.
 function normalizeEgyptPhone(raw) {
   let digits = String(raw || '').replace(/[^\d]/g, '');
   if (digits.startsWith('0')) digits = digits.slice(1);
@@ -262,42 +265,61 @@ function normalizeEgyptPhone(raw) {
 }
 
 app.post('/api/whatsapp/send-reminder', requireApprovedAny, async (req, res) => {
-  const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
-  const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
-  const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || '';
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_WHATSAPP_FROM) {
+  const META_PHONE_NUMBER_ID = process.env.META_WHATSAPP_PHONE_NUMBER_ID || '';
+  const META_ACCESS_TOKEN = process.env.META_WHATSAPP_ACCESS_TOKEN || '';
+  // Set this once Meta approves your reminder template (e.g. "appointment_reminder").
+  // Until then this defaults to a placeholder name that will fail at Meta's
+  // end with a clear "template not found" error rather than silently doing
+  // the wrong thing.
+  const META_TEMPLATE_NAME = process.env.META_WHATSAPP_TEMPLATE_NAME || 'appointment_reminder';
+  if (!META_PHONE_NUMBER_ID || !META_ACCESS_TOKEN) {
     return res.status(501).json({
-      error: 'WhatsApp Business API is not set up yet. Once your Twilio WhatsApp sender and Meta template are approved, set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_FROM in Render — no code changes needed after that.',
+      error: 'WhatsApp Business API is not set up yet. Once your Meta Business verification and message template are approved, set META_WHATSAPP_PHONE_NUMBER_ID and META_WHATSAPP_ACCESS_TOKEN in Render — no code changes needed after that.',
     });
   }
   const { patientPhone, patientName, appointmentTime } = req.body || {};
   if (!patientPhone) return res.status(400).json({ error: 'Missing patientPhone.' });
   try {
     const normalizedPhone = normalizeEgyptPhone(patientPhone);
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
-    // NOTE: outside an active 24h conversation window, WhatsApp requires
-    // sending via an APPROVED template (ContentSid + ContentVariables),
-    // not a free-form Body. Swap this once your template is approved —
-    // Twilio's dashboard will give you the exact ContentSid to use.
-    const body = new URLSearchParams({
-      From: TWILIO_WHATSAPP_FROM,
-      To: `whatsapp:+${normalizedPhone}`,
-      Body: `تذكير بميعادك في عيادة Empower يوم ${appointmentTime || ''} — ${patientName || ''}. لو محتاج تأجيل كلمنا.`,
-    });
+    const url = `https://graph.facebook.com/v21.0/${META_PHONE_NUMBER_ID}/messages`;
+    // Outside an active 24h customer-initiated window, WhatsApp requires an
+    // APPROVED message template (not free-form text) — this is a Meta-wide
+    // rule, the same whether you go direct or through a BSP. Adjust the
+    // component/parameter structure below to match your approved template's
+    // actual variables once you have it (Meta's dashboard shows the exact
+    // shape after approval).
+    const payload = {
+      messaging_product: 'whatsapp',
+      to: normalizedPhone,
+      type: 'template',
+      template: {
+        name: META_TEMPLATE_NAME,
+        language: { code: 'ar' },
+        components: [
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', text: patientName || '' },
+              { type: 'text', text: appointmentTime || '' },
+            ],
+          },
+        ],
+      },
+    };
     const upstream = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: 'Basic ' + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64'),
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${META_ACCESS_TOKEN}`,
       },
-      body,
+      body: JSON.stringify(payload),
     });
     const data = await upstream.json();
     if (!upstream.ok) {
-      console.error('Twilio send failed:', data);
-      return res.status(500).json({ error: data.message || 'Failed to send WhatsApp message.' });
+      console.error('Meta WhatsApp send failed:', data);
+      return res.status(500).json({ error: (data.error && data.error.message) || 'Failed to send WhatsApp message.' });
     }
-    res.json({ ok: true, sid: data.sid });
+    res.json({ ok: true, messageId: data.messages && data.messages[0] && data.messages[0].id });
   } catch (err) {
     console.error('WhatsApp send error:', err);
     res.status(500).json({ error: 'Failed to send: ' + err.message });
