@@ -220,7 +220,7 @@ app.get('/api/appointments', requireApprovedAny, async (req, res) => {
 
 app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { patientName, startTime, endTime, doctorColor, doctorName } = req.body || {};
+  const { patientName, startTime, endTime, doctorColor, doctorName, patientPhone } = req.body || {};
   if (!patientName || !startTime || !endTime) return res.status(400).json({ error: 'Missing patientName, startTime, or endTime.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/appointments`;
@@ -238,6 +238,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
         end_time: endTime,
         doctor_color: doctorColor || req.doctor.color || null,
         doctor_name: doctorName || req.doctor.name || req.doctor.email,
+        patient_phone: patientPhone || null,
       }),
     });
     const data = await upstream.text();
@@ -245,6 +246,61 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   } catch (err) {
     console.error('Appointments POST error:', err);
     res.status(500).json({ error: 'Failed to book appointment: ' + err.message });
+  }
+});
+
+// ---- POST /api/whatsapp/send-reminder ----
+// The "official" path (WhatsApp Business API via Twilio). Inactive until
+// TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM are set in
+// Render — set those once your Twilio WhatsApp sender + Meta template
+// approval are complete, and this starts working with no code changes.
+function normalizeEgyptPhone(raw) {
+  let digits = String(raw || '').replace(/[^\d]/g, '');
+  if (digits.startsWith('0')) digits = digits.slice(1);
+  if (!digits.startsWith('20')) digits = '20' + digits;
+  return digits;
+}
+
+app.post('/api/whatsapp/send-reminder', requireApprovedAny, async (req, res) => {
+  const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
+  const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
+  const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || '';
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_WHATSAPP_FROM) {
+    return res.status(501).json({
+      error: 'WhatsApp Business API is not set up yet. Once your Twilio WhatsApp sender and Meta template are approved, set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_FROM in Render — no code changes needed after that.',
+    });
+  }
+  const { patientPhone, patientName, appointmentTime } = req.body || {};
+  if (!patientPhone) return res.status(400).json({ error: 'Missing patientPhone.' });
+  try {
+    const normalizedPhone = normalizeEgyptPhone(patientPhone);
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    // NOTE: outside an active 24h conversation window, WhatsApp requires
+    // sending via an APPROVED template (ContentSid + ContentVariables),
+    // not a free-form Body. Swap this once your template is approved —
+    // Twilio's dashboard will give you the exact ContentSid to use.
+    const body = new URLSearchParams({
+      From: TWILIO_WHATSAPP_FROM,
+      To: `whatsapp:+${normalizedPhone}`,
+      Body: `تذكير بميعادك في عيادة Empower يوم ${appointmentTime || ''} — ${patientName || ''}. لو محتاج تأجيل كلمنا.`,
+    });
+    const upstream = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64'),
+      },
+      body,
+    });
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      console.error('Twilio send failed:', data);
+      return res.status(500).json({ error: data.message || 'Failed to send WhatsApp message.' });
+    }
+    res.json({ ok: true, sid: data.sid });
+  } catch (err) {
+    console.error('WhatsApp send error:', err);
+    res.status(500).json({ error: 'Failed to send: ' + err.message });
   }
 });
 
