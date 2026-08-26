@@ -249,6 +249,29 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- WhatsApp webhook (Meta calls these directly, so no doctor-auth
+// middleware here — protected by the verify token instead). ----
+const META_WEBHOOK_VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || 'empower_verify_2026';
+
+app.get('/api/whatsapp/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token === META_WEBHOOK_VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
+app.post('/api/whatsapp/webhook', (req, res) => {
+  // Logs incoming messages/status updates for now (visible in Render logs).
+  // This is the hook point for the payment-confirmation flow later: detect
+  // whether a reply contains an image, and if not, resend the payment link.
+  console.log('WhatsApp webhook event:', JSON.stringify(req.body));
+  res.sendStatus(200);
+});
+
 // ---- POST /api/whatsapp/send-reminder ----
 // The genuinely free path: Meta's own WhatsApp Cloud API, direct — no BSP
 // (no Twilio, no 360dialog, no monthly subscription or per-message markup
