@@ -1,39 +1,22 @@
 // Qalam PT Scribe — backend proxy
 //
-// AUTH MODEL (v2 — server-managed sessions): sign-in still starts with a
-// real Google login, but instead of the browser holding a Google access
-// token directly (which Google only ever issues for ~1 hour, with no way
-// for a pure client-side app to renew it silently forever), the browser
-// exchanges a Google authorization code with THIS SERVER. The server:
-//   1. Exchanges the code with Google for an access token + a long-lived
-//      refresh token (only possible server-side, using the client secret).
-//   2. Stores that refresh token against the doctor's row.
-//   3. Issues its OWN long-lived session token (HMAC-signed, verified
-//      locally — no per-request call to Google at all) and sends that to
-//      the browser instead.
-// The browser then sends OUR session token on every request. This is what
-// makes "stay signed in" actually work — our session token doesn't expire
-// hourly, and verifying it costs nothing (no network call), unlike the
-// old approach of re-checking a Google token with Google every time.
+// AUTH MODEL: no shared password. Every request must carry a real Google
+// access token (from the doctor's own Google sign-in, via a popup on the
+// frontend) in the Authorization: Bearer <token> header. This server
+// verifies that token with Google on every request, then checks the
+// doctors table to confirm that email is an APPROVED doctor at this
+// clinic before doing anything. Owner-only actions additionally require
+// role = 'owner' in that table.
 //
-// Owner-only actions additionally require role = 'owner' in the doctors
-// table. The one exception is a one-time bootstrap step: OWNER_SECRET (an
-// env var) is used ONLY to promote the very first signed-in user to
-// owner, since the doctors table starts empty and someone has to be able
-// to approve the first person.
+// The one exception is a one-time bootstrap step: OWNER_SECRET (an env
+// var) is used ONLY to promote the very first signed-in user to owner,
+// since the doctors table starts empty and someone has to be able to
+// approve the first person.
 
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto');
 
 const app = express();
-// Render (and most PaaS hosts) terminate HTTPS at a proxy in front of the
-// app and forward requests internally as plain HTTP — without this,
-// req.protocol reports 'http' even for a genuinely HTTPS visitor, which
-// silently breaks the OAuth redirect_uri match below (Google requires an
-// exact match between the URI used to request the code and the one used
-// to exchange it).
-app.set('trust proxy', 1);
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || '';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
@@ -42,60 +25,9 @@ const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const OWNER_SECRET = process.env.OWNER_SECRET || '';
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
-const SESSION_SECRET = process.env.SESSION_SECRET || '';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://drmostafafarag98-ai.github.io/Pt-script/';
-const BACKEND_URL = process.env.BACKEND_URL || 'https://pt-script-backend.onrender.com';
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
-
-// TEMPORARY DIAGNOSTIC — remove once the OAuth "unauthorized_client" issue
-// is resolved. Logs enough to rule out invisible whitespace or truncation
-// in the Render env vars without ever printing the actual secret.
-console.log('[diag] GOOGLE_CLIENT_ID length:', GOOGLE_CLIENT_ID.length, 'starts:', JSON.stringify(GOOGLE_CLIENT_ID.slice(0, 12)), 'ends:', JSON.stringify(GOOGLE_CLIENT_ID.slice(-12)));
-console.log('[diag] GOOGLE_CLIENT_SECRET length:', GOOGLE_CLIENT_SECRET.length, 'starts:', JSON.stringify(GOOGLE_CLIENT_SECRET.slice(0, 8)), 'ends:', JSON.stringify(GOOGLE_CLIENT_SECRET.slice(-4)));
-console.log('[diag] BACKEND_URL:', JSON.stringify(BACKEND_URL));
-console.log('[diag] FRONTEND_URL:', JSON.stringify(FRONTEND_URL));
 
 app.use(cors({ origin: ALLOWED_ORIGIN }));
 
-// ---- Our own long-lived session tokens (not Google's) ----
-function base64url(input) {
-  return Buffer.from(input).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-function base64urlDecode(input) {
-  input = input.replace(/-/g, '+').replace(/_/g, '/');
-  while (input.length % 4) input += '=';
-  return Buffer.from(input, 'base64').toString('utf8');
-}
-function signSessionToken(email) {
-  const payload = JSON.stringify({ email, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS });
-  const payloadPart = base64url(payload);
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payloadPart).digest();
-  const sigPart = base64url(sig);
-  return `${payloadPart}.${sigPart}`;
-}
-function verifySessionToken(token) {
-  if (!token || !SESSION_SECRET) return null;
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [payloadPart, sigPart] = parts;
-  const expectedSig = base64url(crypto.createHmac('sha256', SESSION_SECRET).update(payloadPart).digest());
-  const a = Buffer.from(sigPart);
-  const b = Buffer.from(expectedSig);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  try {
-    const payload = JSON.parse(base64urlDecode(payloadPart));
-    if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return payload.email || null;
-  } catch (err) {
-    return null;
-  }
-}
-
-// Still used specifically by the OAuth callback (talking to Google
-// directly there is unavoidable — this is not used on every request
-// anymore, only once at sign-in time).
 async function verifyGoogleToken(accessToken) {
   if (!accessToken) return null;
   try {
@@ -129,7 +61,7 @@ function extractBearerToken(req) {
 
 async function requireApprovedDoctor(req, res, next) {
   const token = extractBearerToken(req);
-  const email = verifySessionToken(token);
+  const email = await verifyGoogleToken(token);
   if (!email) {
     return res.status(401).json({ error: 'Sign in with Google required.' });
   }
@@ -150,7 +82,7 @@ async function requireApprovedDoctor(req, res, next) {
 // endpoints, since secretaries need to view/book appointments too.
 async function requireApprovedAny(req, res, next) {
   const token = extractBearerToken(req);
-  const email = verifySessionToken(token);
+  const email = await verifyGoogleToken(token);
   if (!email) {
     return res.status(401).json({ error: 'Sign in with Google required.' });
   }
@@ -166,7 +98,7 @@ async function requireApprovedAny(req, res, next) {
 
 async function requireOwnerDoctor(req, res, next) {
   const token = extractBearerToken(req);
-  const email = verifySessionToken(token);
+  const email = await verifyGoogleToken(token);
   if (!email) {
     return res.status(401).json({ error: 'Sign in with Google required.' });
   }
@@ -182,7 +114,7 @@ async function requireOwnerDoctor(req, res, next) {
 // secretaries handle the schedule day-to-day but shouldn't approve staff.
 async function requireOwnerOrSecretary(req, res, next) {
   const token = extractBearerToken(req);
-  const email = verifySessionToken(token);
+  const email = await verifyGoogleToken(token);
   if (!email) {
     return res.status(401).json({ error: 'Sign in with Google required.' });
   }
@@ -193,121 +125,6 @@ async function requireOwnerOrSecretary(req, res, next) {
   req.doctor = doctor;
   next();
 }
-
-// ---- Google OAuth callback (server-side code exchange) ----
-// The frontend redirects the browser here (Google redirects here after
-// consent) with ?code=... We exchange that code for Google tokens,
-// capture the refresh token so Drive uploads keep working long-term, then
-// hand the browser OUR OWN session token and send it back to the app.
-app.get('/api/auth/google/callback', async (req, res) => {
-  const { code, error: oauthError } = req.query;
-  if (oauthError) {
-    return res.redirect(`${FRONTEND_URL}#auth_error=${encodeURIComponent(String(oauthError))}`);
-  }
-  if (!code) {
-    return res.redirect(`${FRONTEND_URL}#auth_error=missing_code`);
-  }
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !SESSION_SECRET) {
-    return res.redirect(`${FRONTEND_URL}#auth_error=server_not_configured`);
-  }
-  try {
-    const redirectUri = `${BACKEND_URL}/api/auth/google/callback`;
-    console.log('[diag] Exchanging code. redirectUri:', JSON.stringify(redirectUri), 'client_id used:', JSON.stringify(GOOGLE_CLIENT_ID));
-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code: String(code),
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri,
-        grant_type: 'authorization_code',
-      }),
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenRes.ok || !tokenData.access_token) {
-      console.error('Google token exchange failed:', tokenData);
-      const detail = encodeURIComponent(tokenData.error_description || tokenData.error || 'unknown');
-      return res.redirect(`${FRONTEND_URL}#auth_error=${encodeURIComponent('token_exchange_failed: ' + detail)}`);
-    }
-    const email = await verifyGoogleToken(tokenData.access_token);
-    if (!email) {
-      return res.redirect(`${FRONTEND_URL}#auth_error=could_not_verify_email`);
-    }
-    // Store/update the doctor row, capturing the refresh token if Google
-    // gave us one this time (Google only sends it the FIRST time a user
-    // consents, or when prompt=consent forces re-consent — subsequent
-    // logins may not include one, so we only overwrite when present).
-    let doctor = await lookupDoctor(email);
-    const patchBody = {};
-    if (tokenData.refresh_token) patchBody.google_refresh_token = tokenData.refresh_token;
-    if (!doctor) {
-      const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors`, {
-        method: 'POST',
-        headers: {
-          apikey: SUPABASE_SERVICE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-          'Content-Type': 'application/json',
-          Prefer: 'return=representation',
-        },
-        body: JSON.stringify({ email, name: email, status: 'pending', ...patchBody }),
-      });
-      const inserted = await insertRes.json();
-      doctor = Array.isArray(inserted) ? inserted[0] : inserted;
-    } else if (tokenData.refresh_token) {
-      await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(email)}`, {
-        method: 'PATCH',
-        headers: {
-          apikey: SUPABASE_SERVICE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(patchBody),
-      });
-    }
-    const sessionToken = signSessionToken(email);
-    res.redirect(`${FRONTEND_URL}#session=${encodeURIComponent(sessionToken)}`);
-  } catch (err) {
-    console.error('OAuth callback error:', err);
-    res.redirect(`${FRONTEND_URL}#auth_error=${encodeURIComponent(err.message || 'unknown')}`);
-  }
-});
-
-// ---- Fresh short-lived Google access token, for Drive uploads only ----
-// The frontend still talks to Google Drive's API directly (not proxied),
-// so it occasionally needs a real (short-lived) Google access token. This
-// endpoint uses the doctor's stored refresh token to mint one on demand —
-// the browser itself never sees or stores the refresh token.
-app.post('/api/auth/google/fresh-token', requireApprovedAny, async (req, res) => {
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
-    return res.status(501).json({ error: 'Server is missing Google OAuth client credentials.' });
-  }
-  const refreshToken = req.doctor.google_refresh_token;
-  if (!refreshToken) {
-    return res.status(400).json({ error: 'No stored Google refresh token for this account yet — sign out and sign in again to grant Drive access.' });
-  }
-  try {
-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        refresh_token: refreshToken,
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        grant_type: 'refresh_token',
-      }),
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenRes.ok || !tokenData.access_token) {
-      console.error('Refresh token exchange failed:', tokenData);
-      return res.status(500).json({ error: 'Could not refresh Google access — try signing in again.' });
-    }
-    res.json({ accessToken: tokenData.access_token, expiresIn: tokenData.expires_in });
-  } catch (err) {
-    console.error('Fresh token error:', err);
-    res.status(500).json({ error: 'Failed to get fresh token: ' + err.message });
-  }
-});
 
 app.post(
   '/api/transcribe',
@@ -824,20 +641,36 @@ app.post('/api/sessions/:id/reject-delete', requireOwnerDoctor, async (req, res)
 });
 
 // ---- POST /api/doctors/checkin ----
-// Kept for the frontend's periodic "refresh my status" calls (e.g. after
-// an owner approves someone, or just to re-check on page load) — using
-// OUR session token now, not a Google token. Doctor creation itself
-// happens in /api/auth/google/callback, so this just looks up and
-// returns the current row.
 app.post('/api/doctors/checkin', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const token = extractBearerToken(req);
-  const email = verifySessionToken(token);
-  if (!email) return res.status(401).json({ error: 'Sign in with Google required.' });
+  const email = await verifyGoogleToken(token);
+  if (!email) return res.status(401).json({ error: 'Invalid or expired Google token.' });
+  const { name } = req.body || {};
   try {
-    const doctor = await lookupDoctor(email);
-    if (!doctor) return res.status(404).json({ error: 'Not registered yet — sign in again to complete registration.' });
-    res.json(doctor);
+    const existing = await lookupDoctor(email);
+    if (existing) return res.json(existing);
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ email, name: name || email, status: 'pending' }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) {
+      console.error('Doctor insert failed:', insertRes.status, inserted);
+      return res.status(500).json({ error: 'Could not create doctor record: ' + (inserted.message || JSON.stringify(inserted)).slice(0, 300) });
+    }
+    const doctorRow = Array.isArray(inserted) ? inserted[0] : inserted;
+    if (!doctorRow || !doctorRow.email) {
+      console.error('Doctor insert returned unexpected shape:', inserted);
+      return res.status(500).json({ error: 'Doctor record was created but the server response was malformed.' });
+    }
+    res.json(doctorRow);
   } catch (err) {
     console.error('Doctor checkin error:', err);
     res.status(500).json({ error: 'Check-in failed: ' + err.message });
@@ -852,7 +685,7 @@ app.post('/api/doctors/checkin', async (req, res) => {
 app.post('/api/doctors/me/name', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const token = extractBearerToken(req);
-  const email = verifySessionToken(token);
+  const email = await verifyGoogleToken(token);
   if (!email) return res.status(401).json({ error: 'Sign in with Google required.' });
   const { name } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Missing name.' });
@@ -888,7 +721,7 @@ app.post('/api/doctors/bootstrap-owner', async (req, res) => {
   const provided = req.header('x-owner-secret');
   if (provided !== OWNER_SECRET) return res.status(401).json({ error: 'Invalid owner secret.' });
   const token = extractBearerToken(req);
-  const email = verifySessionToken(token);
+  const email = await verifyGoogleToken(token);
   if (!email) return res.status(401).json({ error: 'Sign in with Google required.' });
   const { name } = req.body || {};
   try {
