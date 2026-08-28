@@ -49,6 +49,14 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'https://drmostafafarag98-ai.gi
 const BACKEND_URL = process.env.BACKEND_URL || 'https://pt-script-backend.onrender.com';
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
+// TEMPORARY DIAGNOSTIC — remove once the OAuth "unauthorized_client" issue
+// is resolved. Logs enough to rule out invisible whitespace or truncation
+// in the Render env vars without ever printing the actual secret.
+console.log('[diag] GOOGLE_CLIENT_ID length:', GOOGLE_CLIENT_ID.length, 'starts:', JSON.stringify(GOOGLE_CLIENT_ID.slice(0, 12)), 'ends:', JSON.stringify(GOOGLE_CLIENT_ID.slice(-12)));
+console.log('[diag] GOOGLE_CLIENT_SECRET length:', GOOGLE_CLIENT_SECRET.length, 'starts:', JSON.stringify(GOOGLE_CLIENT_SECRET.slice(0, 8)), 'ends:', JSON.stringify(GOOGLE_CLIENT_SECRET.slice(-4)));
+console.log('[diag] BACKEND_URL:', JSON.stringify(BACKEND_URL));
+console.log('[diag] FRONTEND_URL:', JSON.stringify(FRONTEND_URL));
+
 app.use(cors({ origin: ALLOWED_ORIGIN }));
 
 // ---- Our own long-lived session tokens (not Google's) ----
@@ -204,6 +212,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
   }
   try {
     const redirectUri = `${BACKEND_URL}/api/auth/google/callback`;
+    console.log('[diag] Exchanging code. redirectUri:', JSON.stringify(redirectUri), 'client_id used:', JSON.stringify(GOOGLE_CLIENT_ID));
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
