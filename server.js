@@ -27,6 +27,13 @@ const cors = require('cors');
 const crypto = require('crypto');
 
 const app = express();
+// Render (and most PaaS hosts) terminate HTTPS at a proxy in front of the
+// app and forward requests internally as plain HTTP — without this,
+// req.protocol reports 'http' even for a genuinely HTTPS visitor, which
+// silently breaks the OAuth redirect_uri match below (Google requires an
+// exact match between the URI used to request the code and the one used
+// to exchange it).
+app.set('trust proxy', 1);
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || '';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
@@ -39,6 +46,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://drmostafafarag98-ai.github.io/Pt-script/';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://pt-script-backend.onrender.com';
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
 app.use(cors({ origin: ALLOWED_ORIGIN }));
@@ -195,7 +203,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
     return res.redirect(`${FRONTEND_URL}#auth_error=server_not_configured`);
   }
   try {
-    const redirectUri = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+    const redirectUri = `${BACKEND_URL}/api/auth/google/callback`;
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -210,7 +218,8 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (!tokenRes.ok || !tokenData.access_token) {
       console.error('Google token exchange failed:', tokenData);
-      return res.redirect(`${FRONTEND_URL}#auth_error=token_exchange_failed`);
+      const detail = encodeURIComponent(tokenData.error_description || tokenData.error || 'unknown');
+      return res.redirect(`${FRONTEND_URL}#auth_error=${encodeURIComponent('token_exchange_failed: ' + detail)}`);
     }
     const email = await verifyGoogleToken(tokenData.access_token);
     if (!email) {
