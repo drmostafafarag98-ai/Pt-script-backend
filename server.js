@@ -56,7 +56,6 @@ console.log('[diag] GOOGLE_CLIENT_ID length:', GOOGLE_CLIENT_ID.length, 'starts:
 console.log('[diag] GOOGLE_CLIENT_SECRET length:', GOOGLE_CLIENT_SECRET.length, 'starts:', JSON.stringify(GOOGLE_CLIENT_SECRET.slice(0, 8)), 'ends:', JSON.stringify(GOOGLE_CLIENT_SECRET.slice(-4)));
 console.log('[diag] BACKEND_URL:', JSON.stringify(BACKEND_URL));
 console.log('[diag] FRONTEND_URL:', JSON.stringify(FRONTEND_URL));
-console.log('[diag] Server time:', new Date().toISOString());
 
 app.use(cors({ origin: ALLOWED_ORIGIN }));
 
@@ -225,22 +224,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
         grant_type: 'authorization_code',
       }),
     });
-
-    // TEMPORARY DIAGNOSTIC — read the raw response body as text first (not
-    // .json()) so we can log the *exact* bytes Google sent back, including
-    // the HTTP status/statusText and any fields beyond error/error_description
-    // (e.g. error_uri). This survives even if the body isn't valid JSON.
-    const tokenRawText = await tokenRes.text();
-    console.log('[diag] Token endpoint HTTP status:', tokenRes.status, tokenRes.statusText);
-    console.log('[diag] Token endpoint raw response:', tokenRawText);
-    let tokenData;
-    try {
-      tokenData = JSON.parse(tokenRawText);
-    } catch (parseErr) {
-      console.error('[diag] Token endpoint response was not valid JSON:', parseErr.message);
-      tokenData = {};
-    }
-
+    const tokenData = await tokenRes.json();
     if (!tokenRes.ok || !tokenData.access_token) {
       console.error('Google token exchange failed:', tokenData);
       const detail = encodeURIComponent(tokenData.error_description || tokenData.error || 'unknown');
