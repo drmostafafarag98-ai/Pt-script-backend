@@ -269,6 +269,35 @@ app.post('/api/settings/:key', requireOwnerOrSecretary, async (req, res) => {
   }
 });
 
+// ---- GET /api/patients ----
+// A quick "have we seen this patient before" lookup, built from past
+// appointments (name + their most recent phone number) rather than a
+// separate patients table. Used by the frontend to autocomplete the name
+// and auto-fill the phone when booking a returning patient again.
+app.get('/api/patients', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?select=patient_name,patient_phone,start_time&order=start_time.desc&limit=1000`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const rows = await upstream.json();
+    if (!upstream.ok) {
+      console.error('Patients GET error:', upstream.status, rows);
+      return res.status(500).json({ error: 'Failed to load patients.' });
+    }
+    const seen = new Map();
+    (rows || []).forEach(r => {
+      const name = (r.patient_name || '').trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (!seen.has(key)) seen.set(key, { name, phone: r.patient_phone || null });
+    });
+    res.json(Array.from(seen.values()));
+  } catch (err) {
+    console.error('Patients GET error:', err);
+    res.status(500).json({ error: 'Failed to load patients: ' + err.message });
+  }
+});
+
 app.get('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
@@ -862,6 +891,62 @@ app.post('/api/doctors/me/name', async (req, res) => {
   }
 });
 
+// ---- POST /api/doctors/me/color ----
+// Lets a signed-in doctor set their own calendar color (the "Your color
+// on the clinic calendar" swatches in Settings). Previously that picker
+// only saved to the device — it never told the server, so the doctors
+// table (and anything reading from it) kept showing the old color. This
+// also cascades the new color onto that doctor's own upcoming
+// appointments, same as the owner/secretary color-panel endpoint does.
+app.post('/api/doctors/me/color', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const token = extractBearerToken(req);
+  const email = await verifyGoogleToken(token);
+  if (!email) return res.status(401).json({ error: 'Sign in with Google required.' });
+  const { color } = req.body || {};
+  if (!color) return res.status(400).json({ error: 'Missing color.' });
+  try {
+    const existing = await lookupDoctor(email);
+    if (!existing) return res.status(404).json({ error: 'You are not registered at this clinic yet — sign in first.' });
+    const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(email)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ color }),
+    });
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      console.error('Self color update failed:', upstream.status, data);
+      return res.status(500).json({ error: 'Could not update color.' });
+    }
+    if (existing.name) {
+      const nowIso = new Date().toISOString();
+      const cascadeUrl = `${SUPABASE_URL}/rest/v1/appointments?doctor_name=eq.${encodeURIComponent(existing.name)}&start_time=gte.${encodeURIComponent(nowIso)}`;
+      const cascadeRes = await fetch(cascadeUrl, {
+        method: 'PATCH',
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ doctor_color: color }),
+      });
+      if (!cascadeRes.ok) {
+        console.error('Self color cascade to appointments failed:', cascadeRes.status, await cascadeRes.text());
+      }
+    }
+    res.json(Array.isArray(data) ? data[0] : data);
+  } catch (err) {
+    console.error('Self color update error:', err);
+    res.status(500).json({ error: 'Failed to update color: ' + err.message });
+  }
+});
+
 app.post('/api/doctors/bootstrap-owner', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   if (!OWNER_SECRET) return res.status(500).json({ error: 'Server is missing OWNER_SECRET.' });
@@ -977,6 +1062,7 @@ app.post('/api/doctors/:email/color', requireOwnerOrSecretary, async (req, res) 
   const { color } = req.body || {};
   if (!color) return res.status(400).json({ error: 'Missing color.' });
   try {
+    const doctor = await lookupDoctor(req.params.email);
     const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`;
     const upstream = await fetch(url, {
       method: 'PATCH',
@@ -987,6 +1073,29 @@ app.post('/api/doctors/:email/color', requireOwnerOrSecretary, async (req, res) 
       },
       body: JSON.stringify({ color }),
     });
+
+    // Cascade the new color onto this doctor's upcoming appointments —
+    // they were booked with the old color baked in (doctor_color is
+    // stored per-appointment, not looked up live), so without this a
+    // color change wouldn't show up on anything already on the calendar.
+    // Past appointments are left alone; only start_time >= now is touched.
+    if (upstream.ok && doctor && doctor.name) {
+      const nowIso = new Date().toISOString();
+      const cascadeUrl = `${SUPABASE_URL}/rest/v1/appointments?doctor_name=eq.${encodeURIComponent(doctor.name)}&start_time=gte.${encodeURIComponent(nowIso)}`;
+      const cascadeRes = await fetch(cascadeUrl, {
+        method: 'PATCH',
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ doctor_color: color }),
+      });
+      if (!cascadeRes.ok) {
+        console.error('Color cascade to appointments failed:', cascadeRes.status, await cascadeRes.text());
+      }
+    }
+
     res.status(upstream.status).json({ ok: upstream.ok });
   } catch (err) {
     console.error('Doctor color update error:', err);
