@@ -315,6 +315,61 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- PATCH /api/appointments/:id ----
+// Edits an existing booking — any subset of patientName, patientPhone,
+// startTime, endTime, doctorColor, doctorName. Same access as booking
+// (owner, doctor, or secretary), since secretaries manage the day-to-day
+// calendar too.
+app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName } = req.body || {};
+  const patch = {};
+  if (patientName !== undefined) patch.patient_name = patientName;
+  if (patientPhone !== undefined) patch.patient_phone = patientPhone || null;
+  if (startTime !== undefined) patch.start_time = startTime;
+  if (endTime !== undefined) patch.end_time = endTime;
+  if (doctorColor !== undefined) patch.doctor_color = doctorColor || null;
+  if (doctorName !== undefined) patch.doctor_name = doctorName || null;
+  if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to update.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify(patch),
+    });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Appointment PATCH error:', err);
+    res.status(500).json({ error: 'Failed to update appointment: ' + err.message });
+  }
+});
+
+// ---- DELETE /api/appointments/:id ----
+app.delete('/api/appointments/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
+    const upstream = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    });
+    res.status(upstream.status).json({ ok: upstream.ok });
+  } catch (err) {
+    console.error('Appointment DELETE error:', err);
+    res.status(500).json({ error: 'Failed to delete appointment: ' + err.message });
+  }
+});
+
 // ---- WhatsApp webhook (Meta calls these directly, so no doctor-auth
 // middleware here — protected by the verify token instead). ----
 const META_WEBHOOK_VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || 'empower_verify_2026';
