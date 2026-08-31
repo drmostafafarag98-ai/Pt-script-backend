@@ -53,6 +53,25 @@ async function lookupDoctor(email) {
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+// Manually-added doctors (added by the owner from the roster, before that
+// doctor has ever signed in with Google) get a placeholder email at
+// @empower.local instead of a real one — they're full, normal team members
+// (name + color + approved status), just not yet linked to a Google
+// account. This looks one up by name so /api/doctors/checkin can merge a
+// real Google sign-in into the existing row instead of creating a
+// duplicate.
+async function lookupManualDoctorByName(name) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !name) return null;
+  const normalized = name.trim();
+  if (!normalized) return null;
+  const url = `${SUPABASE_URL}/rest/v1/doctors?email=like.*@empower.local&name=ilike.${encodeURIComponent(normalized)}`;
+  const res = await fetch(url, {
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+  });
+  const rows = await res.json();
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
 function extractBearerToken(req) {
   const header = req.header('authorization') || '';
   const match = header.match(/^Bearer\s+(.+)$/i);
@@ -696,6 +715,33 @@ app.post('/api/doctors/checkin', async (req, res) => {
   try {
     const existing = await lookupDoctor(email);
     if (existing) return res.json(existing);
+
+    // No row for this exact Google email yet — check whether the owner
+    // already added this person manually (by name) before they ever
+    // signed in. If so, link this Google email into that existing row
+    // (keeping their color/status/history) instead of creating a new one.
+    const manualMatch = await lookupManualDoctorByName(name);
+    if (manualMatch) {
+      const linkUrl = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(manualMatch.email)}`;
+      const linkRes = await fetch(linkUrl, {
+        method: 'PATCH',
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+        body: JSON.stringify({ email }),
+      });
+      const linked = await linkRes.json();
+      if (!linkRes.ok) {
+        console.error('Doctor auto-link failed:', linkRes.status, linked);
+        return res.status(500).json({ error: 'Could not link your account: ' + (linked.message || JSON.stringify(linked)).slice(0, 300) });
+      }
+      const linkedRow = Array.isArray(linked) ? linked[0] : linked;
+      return res.json(linkedRow);
+    }
+
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors`, {
       method: 'POST',
       headers: {
@@ -796,6 +842,50 @@ app.post('/api/doctors/bootstrap-owner', async (req, res) => {
   } catch (err) {
     console.error('Bootstrap-owner error:', err);
     res.status(500).json({ error: 'Bootstrap failed: ' + err.message });
+  }
+});
+
+// ---- POST /api/doctors/manual ----
+// Owner adds a real clinic team member (name + color) who hasn't signed
+// into the app with Google yet. This is a normal, fully-approved doctor
+// row from day one — not a "pending" placeholder — it just carries a
+// synthetic @empower.local email until she signs in for real, at which
+// point /api/doctors/checkin links her Google account into this same row.
+app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { name, color } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Missing doctor name.' });
+  try {
+    const already = await lookupManualDoctorByName(name);
+    if (already) return res.status(409).json({ error: 'A doctor with that name is already on the roster.' });
+    const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'doctor';
+    const placeholderEmail = `manual-${slug}-${Date.now().toString(36)}@empower.local`;
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        email: placeholderEmail,
+        name: name.trim(),
+        role: 'doctor',
+        status: 'approved',
+        color: color || null,
+        approved_at: new Date().toISOString(),
+      }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) {
+      console.error('Manual doctor insert failed:', insertRes.status, inserted);
+      return res.status(500).json({ error: 'Could not add doctor: ' + (inserted.message || JSON.stringify(inserted)).slice(0, 300) });
+    }
+    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+  } catch (err) {
+    console.error('Manual doctor add error:', err);
+    res.status(500).json({ error: 'Failed to add doctor: ' + err.message });
   }
 });
 
