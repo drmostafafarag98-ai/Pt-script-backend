@@ -204,6 +204,52 @@ app.post('/api/ai', requireApprovedDoctor, async (req, res) => {
   }
 });
 
+// ---- Clinic-wide settings (key-value store) ----
+// Any approved role can read (everyone needs to see the current elevator
+// code, for example), but only the owner or secretary can change one.
+app.get('/api/settings/:key', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/clinic_settings?key=eq.${encodeURIComponent(req.params.key)}`;
+    const upstream = await fetch(url, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await upstream.json();
+    const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    res.json({ key: req.params.key, value: row ? row.value : null, updated_at: row ? row.updated_at : null });
+  } catch (err) {
+    console.error('Settings read error:', err);
+    res.status(500).json({ error: 'Failed to read setting: ' + err.message });
+  }
+});
+
+app.post('/api/settings/:key', requireOwnerOrSecretary, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { value } = req.body || {};
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/clinic_settings`;
+    const upstream = await fetch(url, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=representation',
+      },
+      body: JSON.stringify({ key: req.params.key, value: value || '', updated_at: new Date().toISOString() }),
+    });
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      console.error('Settings write failed:', upstream.status, data);
+      return res.status(500).json({ error: 'Could not save setting.' });
+    }
+    res.json(Array.isArray(data) ? data[0] : data);
+  } catch (err) {
+    console.error('Settings write error:', err);
+    res.status(500).json({ error: 'Failed to save setting: ' + err.message });
+  }
+});
+
 app.get('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
