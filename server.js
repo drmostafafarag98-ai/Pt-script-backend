@@ -29,6 +29,7 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const OWNER_SECRET = process.env.OWNER_SECRET || '';
 
 app.use(cors({ origin: ALLOWED_ORIGIN }));
+app.use(express.json({ limit: '20mb' }));
 
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
@@ -307,8 +308,6 @@ app.post(
     }
   }
 );
-
-app.use(express.json({ limit: '20mb' }));
 
 app.post('/api/ai', requireApprovedDoctor, async (req, res) => {
   const { systemPrompt, userContent, maxTokens, provider } = req.body || {};
