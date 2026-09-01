@@ -1223,6 +1223,75 @@ app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
   }
 });
 
+// ---- POST /api/doctors/merge ----
+// Fixes the "same person ended up as two rows" problem — usually a
+// manually-added doctor (placeholder @empower.local email) whose real
+// Google sign-in didn't auto-link because the name didn't match closely
+// enough, so it created a second row instead. Owner picks which row to
+// KEEP (its name/color/history survive) and which to REMOVE; whichever
+// of the two has a real email (not @empower.local) becomes the surviving
+// row's email, so future sign-ins map correctly.
+app.post('/api/doctors/merge', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { keepEmail, removeEmail } = req.body || {};
+  if (!keepEmail || !removeEmail || keepEmail === removeEmail) {
+    return res.status(400).json({ error: 'Need two different doctor emails: keepEmail and removeEmail.' });
+  }
+  try {
+    const keepRow = await lookupDoctor(keepEmail);
+    const removeRow = await lookupDoctor(removeEmail);
+    if (!keepRow || !removeRow) return res.status(404).json({ error: 'One of those doctors was not found.' });
+
+    const isPlaceholder = (email) => email.endsWith('@empower.local');
+    let finalEmail = keepEmail;
+    if (isPlaceholder(keepEmail) && !isPlaceholder(removeEmail)) finalEmail = removeEmail;
+
+    // Delete the row being removed first — if finalEmail === removeEmail,
+    // that address needs to be free before we can move it onto keepRow.
+    await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(removeEmail)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+
+    if (finalEmail !== keepEmail) {
+      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(keepEmail)}`, {
+        method: 'PATCH',
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+        body: JSON.stringify({ email: finalEmail }),
+      });
+      const patched = await patchRes.json();
+      if (!patchRes.ok) {
+        console.error('Merge email update failed:', patchRes.status, patched);
+        return res.status(500).json({ error: 'Merged, but could not update the email on the kept record.' });
+      }
+    }
+
+    // Also fold any push notification subscriptions from the removed
+    // email over to the surviving email, so notifications keep working.
+    if (finalEmail !== removeEmail) {
+      await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions?email=eq.${encodeURIComponent(removeEmail)}`, {
+        method: 'PATCH',
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email: finalEmail }),
+      }).catch(() => {});
+    }
+
+    res.json({ ok: true, email: finalEmail, name: keepRow.name });
+  } catch (err) {
+    console.error('Doctor merge error:', err);
+    res.status(500).json({ error: 'Failed to merge: ' + err.message });
+  }
+});
+
 app.get('/api/doctors', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
