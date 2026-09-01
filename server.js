@@ -16,6 +16,7 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const webpush = require('web-push');
 
 const app = express();
 
@@ -29,7 +30,99 @@ const OWNER_SECRET = process.env.OWNER_SECRET || '';
 
 app.use(cors({ origin: ALLOWED_ORIGIN }));
 
-const APP_SESSION_DAYS = 30;
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails('mailto:physiotherapyempower@gmail.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+} else {
+  console.warn('VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set — push notifications are disabled.');
+}
+
+// ---- POST /api/push/subscribe ----
+// Saves this device's push subscription against the signed-in doctor's
+// email. A doctor can have several devices/subscriptions at once (each
+// keyed by its unique endpoint URL), all of which get notified.
+app.post('/api/push/subscribe', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { subscription } = req.body || {};
+  if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Missing subscription.' });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify({
+        endpoint: subscription.endpoint,
+        email: req.doctor.email,
+        subscription,
+      }),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Push subscribe error:', err);
+    res.status(500).json({ error: 'Failed to save subscription: ' + err.message });
+  }
+});
+
+// ---- POST /api/push/unsubscribe ----
+app.post('/api/push/unsubscribe', requireApprovedAny, async (req, res) => {
+  const { endpoint } = req.body || {};
+  if (!endpoint) return res.json({ ok: true });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions?endpoint=eq.${encodeURIComponent(endpoint)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Push unsubscribe error:', err);
+    res.json({ ok: true });
+  }
+});
+
+// Sends a push notification to every device subscribed under the given
+// doctor NAME (appointments store doctor_name, not email, so we resolve
+// name -> email -> subscriptions). Best-effort: failures are logged, never
+// thrown, so a notification problem never blocks the appointment save
+// itself. Expired subscriptions (410/404 from the push service) are
+// cleaned up automatically.
+async function notifyDoctorByName(doctorName, title, body) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY || !doctorName || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  try {
+    const doctorRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors?name=eq.${encodeURIComponent(doctorName)}`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const doctors = await doctorRes.json();
+    const doctor = Array.isArray(doctors) && doctors.length > 0 ? doctors[0] : null;
+    if (!doctor) return;
+    const subsRes = await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions?email=eq.${encodeURIComponent(doctor.email)}`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const subs = await subsRes.json();
+    if (!Array.isArray(subs) || subs.length === 0) return;
+    const payload = JSON.stringify({ title, body });
+    await Promise.all(subs.map(async (row) => {
+      try {
+        await webpush.sendNotification(row.subscription, payload);
+      } catch (err) {
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions?endpoint=eq.${encodeURIComponent(row.endpoint)}`, {
+            method: 'DELETE',
+            headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+          }).catch(()=>{});
+        } else {
+          console.error('Push send error:', err.statusCode, err.body || err.message);
+        }
+      }
+    }));
+  } catch (err) {
+    console.error('notifyDoctorByName error:', err);
+  }
+}
 
 // Our own long-lived session tokens, stored in a Supabase table
 // (app_sessions: token text primary key, email text, created_at
@@ -382,6 +475,11 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
     });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
+    if (upstream.ok) {
+      const finalDoctorName = doctorName || req.doctor.name || req.doctor.email;
+      const timeLabel = new Date(startTime).toLocaleString('en-GB', { timeZone: 'Africa/Cairo', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+      notifyDoctorByName(finalDoctorName, 'New appointment', `${patientName} — ${timeLabel}`);
+    }
   } catch (err) {
     console.error('Appointments POST error:', err);
     res.status(500).json({ error: 'Failed to book appointment: ' + err.message });
@@ -419,6 +517,19 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
     });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
+    if (upstream.ok) {
+      try {
+        const rows = JSON.parse(data);
+        const updated = Array.isArray(rows) ? rows[0] : rows;
+        if (updated && updated.doctor_name) {
+          const timeLabel = updated.start_time
+            ? new Date(updated.start_time).toLocaleString('en-GB', { timeZone: 'Africa/Cairo', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+            : '';
+          const title = updated.status === 'cancelled' ? 'Appointment cancelled' : 'Appointment updated';
+          notifyDoctorByName(updated.doctor_name, title, `${updated.patient_name || ''} — ${timeLabel}`);
+        }
+      } catch (e) { /* non-fatal — notification is best-effort */ }
+    }
   } catch (err) {
     console.error('Appointment PATCH error:', err);
     res.status(500).json({ error: 'Failed to update appointment: ' + err.message });
