@@ -15,6 +15,7 @@
 
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 
@@ -28,8 +29,51 @@ const OWNER_SECRET = process.env.OWNER_SECRET || '';
 
 app.use(cors({ origin: ALLOWED_ORIGIN }));
 
+const APP_SESSION_DAYS = 30;
+
+// Our own long-lived session tokens, stored in a Supabase table
+// (app_sessions: token text primary key, email text, created_at
+// timestamptz, expires_at timestamptz). Created once after a real Google
+// sign-in; from then on the frontend uses THIS token instead of the
+// short-lived Google access token, so staying signed in no longer depends
+// on Google's ~1hr token lifetime or on the browser keeping a Google
+// session alive.
+async function lookupAppSession(token) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !token) return null;
+  const url = `${SUPABASE_URL}/rest/v1/app_sessions?token=eq.${encodeURIComponent(token)}`;
+  const res = await fetch(url, {
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+  });
+  const rows = await res.json();
+  const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  if (!row) return null;
+  if (new Date(row.expires_at).getTime() <= Date.now()) return null;
+  return row;
+}
+
+async function createAppSession(email) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + APP_SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  await fetch(`${SUPABASE_URL}/rest/v1/app_sessions`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_SERVICE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ token, email, expires_at: expiresAt }),
+  });
+  return token;
+}
+
 async function verifyGoogleToken(accessToken) {
   if (!accessToken) return null;
+  // Try our own app session token first (the common case once someone has
+  // signed in at least once) — this never calls Google at all.
+  const session = await lookupAppSession(accessToken);
+  if (session) return session.email;
+  // Fall back to a real Google access token (first sign-in, or a session
+  // that hasn't been issued one yet).
   try {
     const res = await fetch(
       `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${encodeURIComponent(accessToken)}`
@@ -793,12 +837,17 @@ app.post('/api/sessions/:id/reject-delete', requireOwnerDoctor, async (req, res)
 app.post('/api/doctors/checkin', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const token = extractBearerToken(req);
-  const email = await verifyGoogleToken(token);
+  // Distinguish "resuming with our own session token" (no new session
+  // needed) from "a real Google token came in" (issue a fresh 30-day app
+  // session, this is a first sign-in on this device).
+  const existingSession = await lookupAppSession(token);
+  const email = existingSession ? existingSession.email : await verifyGoogleToken(token);
   if (!email) return res.status(401).json({ error: 'Invalid or expired Google token.' });
+  const newSessionToken = existingSession ? null : await createAppSession(email);
   const { name } = req.body || {};
   try {
     const existing = await lookupDoctor(email);
-    if (existing) return res.json(existing);
+    if (existing) return res.json(newSessionToken ? { ...existing, session_token: newSessionToken } : existing);
 
     // No row for this exact Google email yet — check whether the owner
     // already added this person manually (by name) before they ever
@@ -823,7 +872,7 @@ app.post('/api/doctors/checkin', async (req, res) => {
         return res.status(500).json({ error: 'Could not link your account: ' + (linked.message || JSON.stringify(linked)).slice(0, 300) });
       }
       const linkedRow = Array.isArray(linked) ? linked[0] : linked;
-      return res.json(linkedRow);
+      return res.json(newSessionToken ? { ...linkedRow, session_token: newSessionToken } : linkedRow);
     }
 
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors`, {
@@ -846,7 +895,7 @@ app.post('/api/doctors/checkin', async (req, res) => {
       console.error('Doctor insert returned unexpected shape:', inserted);
       return res.status(500).json({ error: 'Doctor record was created but the server response was malformed.' });
     }
-    res.json(doctorRow);
+    res.json(newSessionToken ? { ...doctorRow, session_token: newSessionToken } : doctorRow);
   } catch (err) {
     console.error('Doctor checkin error:', err);
     res.status(500).json({ error: 'Check-in failed: ' + err.message });
@@ -944,6 +993,40 @@ app.post('/api/doctors/me/color', async (req, res) => {
   } catch (err) {
     console.error('Self color update error:', err);
     res.status(500).json({ error: 'Failed to update color: ' + err.message });
+  }
+});
+
+// ---- POST /api/auth/logout ----
+// Revokes just the session token used for this request (normal sign-out).
+app.post('/api/auth/logout', async (req, res) => {
+  const token = extractBearerToken(req);
+  if (!token) return res.json({ ok: true });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/app_sessions?token=eq.${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Logout error:', err);
+    res.json({ ok: true }); // don't block sign-out on the client either way
+  }
+});
+
+// ---- POST /api/auth/logout-all ----
+// Revokes EVERY session for the signed-in doctor (all devices) — for a
+// lost or stolen phone, so old sessions stop working immediately rather
+// than waiting out the 30-day expiry.
+app.post('/api/auth/logout-all', requireApprovedAny, async (req, res) => {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/app_sessions?email=eq.${encodeURIComponent(req.doctor.email)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Logout-all error:', err);
+    res.status(500).json({ error: 'Failed to revoke sessions: ' + err.message });
   }
 });
 
