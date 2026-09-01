@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "web-push": "^3.6.7"
   }
 }
