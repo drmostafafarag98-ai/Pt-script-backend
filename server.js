@@ -710,6 +710,41 @@ app.post('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => 
   }
 });
 
+// ---- PATCH /api/sessions/rename-doctor ----
+// A session's doctor_name is a snapshot taken when it was saved (same
+// idea as appointments' doctor_color/doctor_name) — it doesn't
+// automatically follow later renames or account merges. This lets the
+// owner fix the sidebar showing the same person's sessions split across
+// several name spellings, by bulk-renaming every session under fromName
+// to toName in one go.
+app.patch('/api/sessions/rename-doctor', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { fromName, toName } = req.body || {};
+  if (!fromName || !toName) return res.status(400).json({ error: 'Missing fromName or toName.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/sessions?doctor_name=eq.${encodeURIComponent(fromName)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ doctor_name: toName }),
+    });
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      console.error('Session rename-doctor failed:', upstream.status, data);
+      return res.status(500).json({ error: 'Failed to rename sessions.' });
+    }
+    res.json({ ok: true, count: Array.isArray(data) ? data.length : 0 });
+  } catch (err) {
+    console.error('Session rename-doctor error:', err);
+    res.status(500).json({ error: 'Failed to rename sessions: ' + err.message });
+  }
+});
+
 app.post('/api/sessions', requireApprovedDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { id, patientName, sessionDate, sessionType, transcript, note } = req.body || {};
