@@ -395,7 +395,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
 // calendar too.
 app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName } = req.body || {};
+  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status } = req.body || {};
   const patch = {};
   if (patientName !== undefined) patch.patient_name = patientName;
   if (patientPhone !== undefined) patch.patient_phone = patientPhone || null;
@@ -403,6 +403,7 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (endTime !== undefined) patch.end_time = endTime;
   if (doctorColor !== undefined) patch.doctor_color = doctorColor || null;
   if (doctorName !== undefined) patch.doctor_name = doctorName || null;
+  if (status !== undefined) patch.status = status;
   if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to update.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
