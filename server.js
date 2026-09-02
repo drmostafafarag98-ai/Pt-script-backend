@@ -722,8 +722,28 @@ app.patch('/api/sessions/rename-doctor', requireOwnerDoctor, async (req, res) =>
   const { fromName, toName } = req.body || {};
   if (!fromName || !toName) return res.status(400).json({ error: 'Missing fromName or toName.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/sessions?doctor_name=eq.${encodeURIComponent(fromName)}`;
-    const upstream = await fetch(url, {
+    // Fetch every session and match by TRIMMED name in JS, rather than an
+    // exact eq. filter against the raw column — a stray leading/trailing
+    // space in the stored value (invisible in the UI, which trims for
+    // display) would otherwise make the filter match zero rows while the
+    // endpoint still reports success, so nothing visibly changes.
+    const allRes = await fetch(`${SUPABASE_URL}/rest/v1/sessions?select=id,doctor_name`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const allSessions = await allRes.json();
+    if (!allRes.ok) {
+      console.error('Session rename-doctor: could not list sessions', allRes.status, allSessions);
+      return res.status(500).json({ error: 'Could not read sessions to merge.' });
+    }
+    const target = fromName.trim();
+    const matchingIds = (allSessions || [])
+      .filter(s => (s.doctor_name || '').trim() === target)
+      .map(s => s.id);
+    if (matchingIds.length === 0) {
+      return res.status(404).json({ error: `No sessions found under "${fromName}" (nothing to merge).` });
+    }
+    const idList = matchingIds.map(id => `"${id}"`).join(',');
+    const updateRes = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=in.(${idList})`, {
       method: 'PATCH',
       headers: {
         apikey: SUPABASE_SERVICE_KEY,
@@ -731,11 +751,11 @@ app.patch('/api/sessions/rename-doctor', requireOwnerDoctor, async (req, res) =>
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
-      body: JSON.stringify({ doctor_name: toName }),
+      body: JSON.stringify({ doctor_name: toName.trim() }),
     });
-    const data = await upstream.json();
-    if (!upstream.ok) {
-      console.error('Session rename-doctor failed:', upstream.status, data);
+    const data = await updateRes.json();
+    if (!updateRes.ok) {
+      console.error('Session rename-doctor failed:', updateRes.status, data);
       return res.status(500).json({ error: 'Failed to rename sessions.' });
     }
     res.json({ ok: true, count: Array.isArray(data) ? data.length : 0 });
@@ -1220,6 +1240,95 @@ app.post('/api/doctors/bootstrap-owner', async (req, res) => {
 // row from day one — not a "pending" placeholder — it just carries a
 // synthetic @empower.local email until she signs in for real, at which
 // point /api/doctors/checkin links her Google account into this same row.
+// ---- Email + password login (alternative to Google Sign-In) ----
+// Same doctors table, same email as identity — this just adds a second
+// way to prove you're that email besides a Google token, since the
+// Google popup/redirect flow turned out to be unreliable from an
+// "Add to Home Screen" icon. Password hashing uses Node's built-in
+// scrypt (no extra npm dependency needed).
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hash] = stored.split(':');
+  const check = crypto.scryptSync(password, salt, 64).toString('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(check, 'hex'));
+  } catch (e) {
+    return false;
+  }
+}
+
+// ---- POST /api/auth/login ----
+app.post('/api/auth/login', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Missing email or password.' });
+  try {
+    const doctor = await lookupDoctor(email.trim().toLowerCase());
+    if (!doctor || !doctor.password_hash || !verifyPassword(password, doctor.password_hash)) {
+      return res.status(401).json({ error: 'Wrong email or password.' });
+    }
+    const sessionToken = await createAppSession(doctor.email);
+    const { password_hash, ...safeDoctor } = doctor;
+    res.json({ ...safeDoctor, session_token: sessionToken });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Login failed: ' + err.message });
+  }
+});
+
+// ---- POST /api/doctors/:email/set-password ----
+// Owner sets or resets a team member's password — the normal way someone
+// gets onboarded onto password login, or recovers a forgotten one.
+app.post('/api/doctors/:email/set-password', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { password } = req.body || {};
+  if (!password || password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ password_hash: hashPassword(password) }),
+    });
+    res.status(upstream.status).json({ ok: upstream.ok });
+  } catch (err) {
+    console.error('Set-password error:', err);
+    res.status(500).json({ error: 'Failed to set password: ' + err.message });
+  }
+});
+
+// ---- POST /api/auth/change-password ----
+// Self-service: a signed-in doctor changes their own password.
+app.post('/api/auth/change-password', requireApprovedAny, async (req, res) => {
+  const { newPassword } = req.body || {};
+  if (!newPassword || newPassword.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.doctor.email)}`;
+    await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ password_hash: hashPassword(newPassword) }),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Change-password error:', err);
+    res.status(500).json({ error: 'Failed to change password: ' + err.message });
+  }
+});
+
 app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { name, color } = req.body || {};
