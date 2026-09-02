@@ -1331,13 +1331,23 @@ app.post('/api/auth/change-password', requireApprovedAny, async (req, res) => {
 
 app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { name, color } = req.body || {};
+  const { name, color, email } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Missing doctor name.' });
   try {
     const already = await lookupManualDoctorByName(name);
     if (already) return res.status(409).json({ error: 'A doctor with that name is already on the roster.' });
-    const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'doctor';
-    const placeholderEmail = `manual-${slug}-${Date.now().toString(36)}@empower.local`;
+    let finalEmail;
+    if (email && email.trim()) {
+      // Owner already knows this person's real email — use it directly.
+      // No placeholder, no later merge needed: Google sign-in AND
+      // password login both work immediately against this same row.
+      finalEmail = email.trim().toLowerCase();
+      const existing = await lookupDoctor(finalEmail);
+      if (existing) return res.status(409).json({ error: 'A doctor with that email already exists on the roster.' });
+    } else {
+      const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'doctor';
+      finalEmail = `manual-${slug}-${Date.now().toString(36)}@empower.local`;
+    }
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors`, {
       method: 'POST',
       headers: {
@@ -1347,7 +1357,7 @@ app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
         Prefer: 'return=representation',
       },
       body: JSON.stringify({
-        email: placeholderEmail,
+        email: finalEmail,
         name: name.trim(),
         role: 'doctor',
         status: 'approved',
