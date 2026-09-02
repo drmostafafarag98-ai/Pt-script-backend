@@ -466,14 +466,7 @@ app.post('/api/whatsapp/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
-// ---- POST /api/whatsapp/send-reminder ----
-// The genuinely free path: Meta's own WhatsApp Cloud API, direct — no BSP
-// (no Twilio, no 360dialog, no monthly subscription or per-message markup
-// on top of Meta's own small per-message rate). Inactive until
-// META_WHATSAPP_PHONE_NUMBER_ID and META_WHATSAPP_ACCESS_TOKEN are set in
-// Render — set those once your Meta Business verification + message
-// template approval are complete, and this starts working with no code
-// changes.
+// ---- WhatsApp Cloud API: reusable sender ----
 function normalizeEgyptPhone(raw) {
   let digits = String(raw || '').replace(/[^\d]/g, '');
   if (digits.startsWith('0')) digits = digits.slice(1);
@@ -481,67 +474,96 @@ function normalizeEgyptPhone(raw) {
   return digits;
 }
 
-app.post('/api/whatsapp/send-reminder', requireApprovedAny, async (req, res) => {
+// Meta requires an APPROVED template (not free-form text) for any message
+// outside an active 24h customer-initiated window — the same whether you
+// go direct or through a BSP. `params` is an array of plain strings for
+// the template's {{1}} {{2}} {{3}}... body variables; pass an empty array
+// for a template with no variables (package_policy, recovery_session_policy).
+async function sendWhatsAppTemplate(phone, templateName, params) {
   const META_PHONE_NUMBER_ID = process.env.META_WHATSAPP_PHONE_NUMBER_ID || '';
   const META_ACCESS_TOKEN = process.env.META_WHATSAPP_ACCESS_TOKEN || '';
-  // Set this once Meta approves your reminder template (e.g. "appointment_reminder").
-  // Until then this defaults to a placeholder name that will fail at Meta's
-  // end with a clear "template not found" error rather than silently doing
-  // the wrong thing.
-  const META_TEMPLATE_NAME = process.env.META_WHATSAPP_TEMPLATE_NAME || 'appointment_reminder';
   if (!META_PHONE_NUMBER_ID || !META_ACCESS_TOKEN) {
-    return res.status(501).json({
-      error: 'WhatsApp Business API is not set up yet. Once your Meta Business verification and message template are approved, set META_WHATSAPP_PHONE_NUMBER_ID and META_WHATSAPP_ACCESS_TOKEN in Render — no code changes needed after that.',
-    });
+    throw new Error('WhatsApp Business API is not set up — set META_WHATSAPP_PHONE_NUMBER_ID and META_WHATSAPP_ACCESS_TOKEN in Render.');
   }
-  const { patientPhone, patientName, appointmentTime } = req.body || {};
+  const normalizedPhone = normalizeEgyptPhone(phone);
+  const url = `https://graph.facebook.com/v21.0/${META_PHONE_NUMBER_ID}/messages`;
+  const template = { name: templateName, language: { code: 'en' } };
+  if (params && params.length > 0) {
+    template.components = [{ type: 'body', parameters: params.map(p => ({ type: 'text', text: String(p || '') })) }];
+  }
+  const payload = { messaging_product: 'whatsapp', to: normalizedPhone, type: 'template', template };
+  const upstream = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${META_ACCESS_TOKEN}` },
+    body: JSON.stringify(payload),
+  });
+  const data = await upstream.json();
+  if (!upstream.ok) {
+    throw new Error((data.error && data.error.message) || 'Failed to send WhatsApp message.');
+  }
+  return data.messages && data.messages[0] && data.messages[0].id;
+}
+
+app.post('/api/whatsapp/send-reminder', requireApprovedAny, async (req, res) => {
+  const { patientPhone, patientName, appointmentTime, appointmentDate, templateName } = req.body || {};
   if (!patientPhone) return res.status(400).json({ error: 'Missing patientPhone.' });
+  const finalTemplate = templateName || 'appointment_confirmation';
+  // Static (no-variable) templates vs. the two that take name/date/time.
+  const noVariableTemplates = ['package_policy', 'recovery_session_policy', 'instapay_payment'];
+  const params = noVariableTemplates.includes(finalTemplate)
+    ? []
+    : [patientName || '', appointmentDate || '', appointmentTime || ''];
   try {
-    const normalizedPhone = normalizeEgyptPhone(patientPhone);
-    const url = `https://graph.facebook.com/v21.0/${META_PHONE_NUMBER_ID}/messages`;
-    // Outside an active 24h customer-initiated window, WhatsApp requires an
-    // APPROVED message template (not free-form text) — this is a Meta-wide
-    // rule, the same whether you go direct or through a BSP. Adjust the
-    // component/parameter structure below to match your approved template's
-    // actual variables once you have it (Meta's dashboard shows the exact
-    // shape after approval).
-    const payload = {
-      messaging_product: 'whatsapp',
-      to: normalizedPhone,
-      type: 'template',
-      template: {
-        name: META_TEMPLATE_NAME,
-        language: { code: 'ar' },
-        components: [
-          {
-            type: 'body',
-            parameters: [
-              { type: 'text', text: patientName || '' },
-              { type: 'text', text: appointmentTime || '' },
-            ],
-          },
-        ],
-      },
-    };
-    const upstream = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${META_ACCESS_TOKEN}`,
-      },
-      body: JSON.stringify(payload),
-    });
-    const data = await upstream.json();
-    if (!upstream.ok) {
-      console.error('Meta WhatsApp send failed:', data);
-      return res.status(500).json({ error: (data.error && data.error.message) || 'Failed to send WhatsApp message.' });
-    }
-    res.json({ ok: true, messageId: data.messages && data.messages[0] && data.messages[0].id });
+    const messageId = await sendWhatsAppTemplate(patientPhone, finalTemplate, params);
+    res.json({ ok: true, messageId });
   } catch (err) {
-    console.error('WhatsApp send error:', err);
-    res.status(500).json({ error: 'Failed to send: ' + err.message });
+    console.error('Meta WhatsApp send failed:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
+
+// ---- Automatic midnight sending ----
+// Runs inside this same always-on process (kept awake by the UptimeRobot
+// monitor) — no separate cron infrastructure needed. Checks every 5
+// minutes; once per day, the first check that lands between 00:00 and
+// 00:10 Cairo time fires the run and then waits for the date to change
+// again before it can fire a second time.
+let lastAutoSendDate = null;
+async function runMidnightAutoConfirmations() {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+  const nowCairo = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
+  const todayKey = nowCairo.toISOString().slice(0, 10);
+  const isMidnightWindow = nowCairo.getHours() === 0 && nowCairo.getMinutes() < 10;
+  if (!isMidnightWindow || lastAutoSendDate === todayKey) return;
+  lastAutoSendDate = todayKey;
+  console.log(`[auto-confirm] Running for ${todayKey}`);
+  try {
+    const tomorrow = new Date(nowCairo.getFullYear(), nowCairo.getMonth(), nowCairo.getDate() + 1);
+    const start = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 0, 0, 0);
+    const end = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 23, 59, 59);
+    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start.toISOString())}&start_time=lte.${encodeURIComponent(end.toISOString())}&status=neq.cancelled`;
+    const res = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const appointments = await res.json();
+    if (!Array.isArray(appointments)) return;
+    for (const appt of appointments) {
+      if (!appt.patient_phone) continue;
+      const apptDate = new Date(appt.start_time);
+      const dateLabel = apptDate.toLocaleDateString('en-GB', { timeZone: 'Africa/Cairo', weekday: 'long', day: 'numeric', month: 'long' });
+      const timeLabel = apptDate.toLocaleTimeString('en-US', { timeZone: 'Africa/Cairo', hour: 'numeric', minute: '2-digit', hour12: true });
+      try {
+        await sendWhatsAppTemplate(appt.patient_phone, 'appointment_confirmation', [appt.patient_name || '', dateLabel, timeLabel]);
+        console.log(`[auto-confirm] Sent to ${appt.patient_name} (${appt.patient_phone})`);
+      } catch (err) {
+        console.error(`[auto-confirm] Failed for ${appt.patient_name} (${appt.patient_phone}):`, err.message);
+      }
+      await new Promise(r => setTimeout(r, 1200)); // gentle pacing, avoid tripping Meta's rate limits
+    }
+    console.log(`[auto-confirm] Done — ${appointments.length} appointment(s) checked.`);
+  } catch (err) {
+    console.error('[auto-confirm] Run failed:', err);
+  }
+}
+setInterval(runMidnightAutoConfirmations, 5 * 60 * 1000);
 
 // ---- GET /api/appointments/:id/notes ----
 app.get('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => {
