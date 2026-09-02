@@ -37,6 +37,8 @@ app.use(express.json({ limit: '20mb' }));
 // short-lived Google access token, so staying signed in no longer depends
 // on Google's ~1hr token lifetime or on the browser keeping a Google
 // session alive.
+const APP_SESSION_DAYS = 30;
+
 async function lookupAppSession(token) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !token) return null;
   const url = `${SUPABASE_URL}/rest/v1/app_sessions?token=eq.${encodeURIComponent(token)}`;
