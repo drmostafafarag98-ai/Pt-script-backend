@@ -563,7 +563,11 @@ async function runMidnightAutoConfirmations() {
     console.error('[auto-confirm] Run failed:', err);
   }
 }
-setInterval(runMidnightAutoConfirmations, 5 * 60 * 1000);
+// DISABLED for now — the Cloud API test showed "sent" without an actual
+// delivery (likely needs Meta Business Verification / a recipient
+// allow-list before it can message real numbers). Re-enable this line
+// once a test message is confirmed actually arriving on WhatsApp.
+// setInterval(runMidnightAutoConfirmations, 5 * 60 * 1000);
 
 // ---- GET /api/appointments/:id/notes ----
 app.get('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => {
