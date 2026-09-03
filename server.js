@@ -341,6 +341,26 @@ app.get('/api/patients', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- GET /api/appointments/unpaid-by-patient ----
+// A patient doesn't always pay per-session — sometimes one payment covers
+// this session plus an earlier unpaid one. This lets the owner see every
+// unpaid appointment for that patient name so they can pick which ones a
+// single payment settles.
+app.get('/api/appointments/unpaid-by-patient', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { patientName } = req.query;
+  if (!patientName) return res.status(400).json({ error: 'Missing patientName.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=eq.${encodeURIComponent(patientName)}&paid=eq.false&status=neq.cancelled&order=start_time.desc&limit=20`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Unpaid-by-patient GET error:', err);
+    res.status(500).json({ error: 'Failed to load unpaid appointments: ' + err.message });
+  }
+});
+
 app.get('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
