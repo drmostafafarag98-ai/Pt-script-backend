@@ -1390,6 +1390,33 @@ app.get('/api/doctors/colors', requireOwnerOrSecretary, async (req, res) => {
   }
 });
 
+// ---- POST /api/doctors/:email/dashboard-access ----
+// Owner grants/revokes a specific team member's access to the Dashboard
+// (stats view with payment/confirmation numbers) — not tied to role, so
+// the owner can, say, give a trusted secretary access without making
+// them an owner, or keep it from a doctor who shouldn't see clinic-wide
+// financials.
+app.post('/api/doctors/:email/dashboard-access', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { canView } = req.body || {};
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ can_view_dashboard: !!canView }),
+    });
+    res.status(upstream.status).json({ ok: upstream.ok });
+  } catch (err) {
+    console.error('Dashboard-access toggle error:', err);
+    res.status(500).json({ error: 'Failed to update dashboard access: ' + err.message });
+  }
+});
+
 app.post('/api/doctors/:email/color', requireOwnerOrSecretary, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { color } = req.body || {};
