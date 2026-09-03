@@ -607,6 +607,40 @@ app.get('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- DELETE /api/appointments/:id/notes ---- (remove one note by its timestamp)
+app.delete('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { at } = req.query;
+  if (!at) return res.status(400).json({ error: 'Missing at (note timestamp).' });
+  try {
+    const getUrl = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}&select=notes`;
+    const getRes = await fetch(getUrl, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await getRes.json();
+    const existingNotes = (Array.isArray(rows) && rows[0] && rows[0].notes) || [];
+    const updatedNotes = existingNotes.filter(n => n.at !== at);
+    const patchUrl = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
+    const patchRes = await fetch(patchUrl, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ notes: updatedNotes }),
+    });
+    if (!patchRes.ok) {
+      const errBody = await patchRes.text();
+      throw new Error(errBody);
+    }
+    res.json({ notes: updatedNotes });
+  } catch (err) {
+    console.error('Appointment notes DELETE error:', err);
+    res.status(500).json({ error: 'Failed to delete note: ' + err.message });
+  }
+});
+
 // ---- POST /api/appointments/:id/notes ---- (append one note)
 app.post('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
