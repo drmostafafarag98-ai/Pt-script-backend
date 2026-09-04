@@ -1431,7 +1431,7 @@ app.get('/api/doctors', requireOwnerDoctor, async (req, res) => {
 
 // Lighter-weight roster for color assignment — owner OR secretary, and
 // only exposes approved doctors/owners (not pending/removed accounts).
-app.get('/api/doctors/colors', requireOwnerOrSecretary, async (req, res) => {
+app.get('/api/doctors/colors', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/doctors?status=eq.approved&role=in.(doctor,owner)&order=name.asc`;
