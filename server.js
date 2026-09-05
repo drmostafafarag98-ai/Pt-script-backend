@@ -355,8 +355,9 @@ app.get('/api/patients', requireApprovedAny, async (req, res) => {
 // ---- POST /api/packages ---- (create a new package, e.g. right after the purchase payment)
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { patientName, totalSessions } = req.body || {};
+  const { patientName, totalSessions, startingUsed } = req.body || {};
   if (!patientName || !totalSessions || totalSessions < 1) return res.status(400).json({ error: 'Missing patientName or totalSessions.' });
+  const used = Math.max(0, Math.min(totalSessions, parseInt(startingUsed, 10) || 0));
   try {
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/packages`, {
       method: 'POST',
@@ -369,7 +370,7 @@ app.post('/api/packages', requireApprovedAny, async (req, res) => {
       body: JSON.stringify({
         patient_name: patientName,
         total_sessions: totalSessions,
-        used_sessions: 0,
+        used_sessions: used,
         created_by: req.doctor.email,
       }),
     });
