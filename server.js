@@ -346,6 +346,88 @@ app.get('/api/patients', requireApprovedAny, async (req, res) => {
 // this session plus an earlier unpaid one. This lets the owner see every
 // unpaid appointment for that patient name so they can pick which ones a
 // single payment settles.
+// ---- Package tracking ----
+// A package is N pre-paid sessions at a discount (e.g. 6 sessions paid
+// once). We track total vs used sessions so the app can tell the owner
+// exactly when a patient's package runs out, instead of them having to
+// remember/count manually.
+
+// ---- POST /api/packages ---- (create a new package, e.g. right after the purchase payment)
+app.post('/api/packages', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { patientName, totalSessions } = req.body || {};
+  if (!patientName || !totalSessions || totalSessions < 1) return res.status(400).json({ error: 'Missing patientName or totalSessions.' });
+  try {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/packages`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        patient_name: patientName,
+        total_sessions: totalSessions,
+        used_sessions: 0,
+        created_by: req.doctor.email,
+      }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) throw new Error(JSON.stringify(inserted));
+    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+  } catch (err) {
+    console.error('Create package error:', err);
+    res.status(500).json({ error: 'Failed to create package: ' + err.message });
+  }
+});
+
+// ---- GET /api/packages/active-by-patient ---- (find this patient's not-yet-finished package, if any)
+app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { patientName } = req.query;
+  if (!patientName) return res.status(400).json({ error: 'Missing patientName.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/packages?patient_name=eq.${encodeURIComponent(patientName)}&order=created_at.desc`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const rows = await upstream.json();
+    const active = (Array.isArray(rows) ? rows : []).find(p => p.used_sessions < p.total_sessions);
+    res.json(active || null);
+  } catch (err) {
+    console.error('Active package lookup error:', err);
+    res.status(500).json({ error: 'Failed to look up package: ' + err.message });
+  }
+});
+
+// ---- POST /api/packages/:id/use-session ---- (consume one session from the package)
+app.post('/api/packages/:id/use-session', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const getUrl = `${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`;
+    const getRes = await fetch(getUrl, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const rows = await getRes.json();
+    const pkg = Array.isArray(rows) && rows[0];
+    if (!pkg) return res.status(404).json({ error: 'Package not found.' });
+    const newUsed = pkg.used_sessions + 1;
+    const patchRes = await fetch(getUrl, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ used_sessions: newUsed }),
+    });
+    const updated = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(updated));
+    res.json(Array.isArray(updated) ? updated[0] : updated);
+  } catch (err) {
+    console.error('Use-session error:', err);
+    res.status(500).json({ error: 'Failed to update package: ' + err.message });
+  }
+});
+
 app.get('/api/appointments/unpaid-by-patient', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { patientName } = req.query;
