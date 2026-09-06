@@ -429,6 +429,25 @@ app.post('/api/packages/:id/use-session', requireApprovedAny, async (req, res) =
   }
 });
 
+// ---- GET /api/appointments/search-by-patient ----
+// Free-text patient search across ALL dates (not scoped to a month) —
+// powers the calendar's "find a patient" search box, letting the owner
+// jump straight to whichever day their appointment is on.
+app.get('/api/appointments/search-by-patient', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { q } = req.query;
+  if (!q || q.trim().length < 2) return res.status(400).json({ error: 'Search term must be at least 2 characters.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=ilike.*${encodeURIComponent(q.trim())}*&order=start_time.desc&limit=30`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Search-by-patient error:', err);
+    res.status(500).json({ error: 'Search failed: ' + err.message });
+  }
+});
+
 app.get('/api/appointments/unpaid-by-patient', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { patientName } = req.query;
