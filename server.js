@@ -384,6 +384,26 @@ app.post('/api/packages', requireApprovedAny, async (req, res) => {
 });
 
 // ---- GET /api/packages/active-by-patient ---- (find this patient's not-yet-finished package, if any)
+// ---- GET /api/appointments/no-show-count ----
+// Counts how many times this patient has been marked "no_show" — the
+// frontend only allows marking no_show on an appointment that already
+// had a "Confirmed" note, so every row counted here was a confirmed
+// appointment the patient still didn't attend.
+app.get('/api/appointments/no-show-count', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { patientName } = req.query;
+  if (!patientName) return res.status(400).json({ error: 'Missing patientName.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=eq.${encodeURIComponent(patientName)}&status=eq.no_show&select=id`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, Prefer: 'count=exact' } });
+    const rows = await upstream.json();
+    res.json({ count: Array.isArray(rows) ? rows.length : 0 });
+  } catch (err) {
+    console.error('No-show count error:', err);
+    res.status(500).json({ error: 'Failed to count no-shows: ' + err.message });
+  }
+});
+
 app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { patientName } = req.query;
