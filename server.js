@@ -353,6 +353,78 @@ app.get('/api/patients', requireApprovedAny, async (req, res) => {
 // remember/count manually.
 
 // ---- POST /api/packages ---- (create a new package, e.g. right after the purchase payment)
+// ---- Patient intake forms ----
+// A public form (intake.html) patients fill in before their first visit —
+// no login needed to submit. Staff then look it up by name/phone from
+// inside a session and pull the answers in with one tap.
+
+// ---- POST /api/intake ---- (public — no auth, the patient submits this themselves)
+app.post('/api/intake', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { patientName, patientPhone, chiefComplaint, referralSource } = req.body || {};
+  if (!patientName || !patientPhone) return res.status(400).json({ error: 'Missing patientName or patientPhone.' });
+  try {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/patient_intake_forms`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        patient_name: patientName,
+        patient_phone: patientPhone,
+        chief_complaint: chiefComplaint || '',
+        referral_source: referralSource || '',
+        matched: false,
+      }),
+    });
+    if (!insertRes.ok) throw new Error(await insertRes.text());
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Intake submit error:', err);
+    res.status(500).json({ error: 'Failed to submit: ' + err.message });
+  }
+});
+
+// ---- GET /api/intake/unmatched-by-name ---- (staff-side lookup)
+app.get('/api/intake/unmatched-by-name', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { name } = req.query;
+  if (!name || name.trim().length < 2) return res.status(400).json({ error: 'Name too short.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/patient_intake_forms?patient_name=ilike.*${encodeURIComponent(name.trim())}*&matched=eq.false&order=submitted_at.desc&limit=1`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const rows = await upstream.json();
+    res.json((Array.isArray(rows) && rows[0]) || null);
+  } catch (err) {
+    console.error('Intake lookup error:', err);
+    res.status(500).json({ error: 'Lookup failed: ' + err.message });
+  }
+});
+
+// ---- POST /api/intake/:id/mark-matched ----
+app.post('/api/intake/:id/mark-matched', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/patient_intake_forms?id=eq.${encodeURIComponent(req.params.id)}`;
+    await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ matched: true }),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Mark-matched error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { patientName, totalSessions, startingUsed } = req.body || {};
