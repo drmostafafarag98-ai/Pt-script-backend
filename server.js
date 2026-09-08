@@ -595,6 +595,38 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
     });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
+
+    // Give the patient a ready Documentation "file" under their assigned
+    // doctor as soon as they're booked — best-effort, never blocks the
+    // booking response above.
+    if (upstream.ok) {
+      try {
+        const finalDoctorName = doctorName || req.doctor.name || req.doctor.email;
+        const checkUrl = `${SUPABASE_URL}/rest/v1/sessions?patient_name=eq.${encodeURIComponent(patientName)}&doctor_name=eq.${encodeURIComponent(finalDoctorName)}&select=id&limit=1`;
+        const checkRes = await fetch(checkUrl, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+        const existing = await checkRes.json();
+        if (!Array.isArray(existing) || existing.length === 0) {
+          await fetch(`${SUPABASE_URL}/rest/v1/sessions`, {
+            method: 'POST',
+            headers: {
+              apikey: SUPABASE_SERVICE_KEY,
+              Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              id: crypto.randomUUID(),
+              patient_name: patientName,
+              doctor_name: finalDoctorName,
+              session_date: new Date(startTime).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }),
+              session_type: 'assessment',
+              updated_at: new Date().toISOString(),
+            }),
+          });
+        }
+      } catch (fileErr) {
+        console.error('Auto-create documentation file failed (non-fatal):', fileErr);
+      }
+    }
   } catch (err) {
     console.error('Appointments POST error:', err);
     res.status(500).json({ error: 'Failed to book appointment: ' + err.message });
@@ -633,6 +665,38 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
     });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
+
+    if (upstream.ok && (doctorName !== undefined || patientName !== undefined)) {
+      try {
+        const rows = JSON.parse(data);
+        const updated = Array.isArray(rows) ? rows[0] : rows;
+        if (updated && updated.patient_name && updated.doctor_name) {
+          const checkUrl = `${SUPABASE_URL}/rest/v1/sessions?patient_name=eq.${encodeURIComponent(updated.patient_name)}&doctor_name=eq.${encodeURIComponent(updated.doctor_name)}&select=id&limit=1`;
+          const checkRes = await fetch(checkUrl, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+          const existing = await checkRes.json();
+          if (!Array.isArray(existing) || existing.length === 0) {
+            await fetch(`${SUPABASE_URL}/rest/v1/sessions`, {
+              method: 'POST',
+              headers: {
+                apikey: SUPABASE_SERVICE_KEY,
+                Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                id: crypto.randomUUID(),
+                patient_name: updated.patient_name,
+                doctor_name: updated.doctor_name,
+                session_date: updated.start_time ? new Date(updated.start_time).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : null,
+                session_type: 'assessment',
+                updated_at: new Date().toISOString(),
+              }),
+            });
+          }
+        }
+      } catch (fileErr) {
+        console.error('Auto-create documentation file failed on edit (non-fatal):', fileErr);
+      }
+    }
   } catch (err) {
     console.error('Appointment PATCH error:', err);
     res.status(500).json({ error: 'Failed to update appointment: ' + err.message });
