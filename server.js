@@ -872,6 +872,60 @@ app.post('/api/whatsapp/send-reminder', requireApprovedAny, async (req, res) => 
   }
 });
 
+// ---- Sends "appointment_confirmation" to everyone booked on a given day ----
+// Shared by the (currently disabled) midnight auto-scheduler and the
+// manual "send now" button — same logic either way, just triggered
+// differently. Returns a summary instead of just logging, so the manual
+// trigger can show the owner exactly what happened.
+async function sendConfirmationsForDate(targetDate) {
+  const start = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0);
+  const end = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59);
+  const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start.toISOString())}&start_time=lte.${encodeURIComponent(end.toISOString())}&status=neq.cancelled`;
+  const res = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+  const appointments = await res.json();
+  const summary = { total: 0, sent: 0, skippedNoPhone: 0, failed: [] };
+  if (!Array.isArray(appointments)) return summary;
+  summary.total = appointments.length;
+  for (const appt of appointments) {
+    if (!appt.patient_phone) { summary.skippedNoPhone++; continue; }
+    const apptDate = new Date(appt.start_time);
+    const dateLabel = apptDate.toLocaleDateString('en-GB', { timeZone: 'Africa/Cairo', weekday: 'long', day: 'numeric', month: 'long' });
+    const timeLabel = apptDate.toLocaleTimeString('en-US', { timeZone: 'Africa/Cairo', hour: 'numeric', minute: '2-digit', hour12: true });
+    try {
+      await sendWhatsAppTemplate(appt.patient_phone, 'appointment_confirmation', [appt.patient_name || '', dateLabel, timeLabel]);
+      summary.sent++;
+    } catch (err) {
+      summary.failed.push({ patient: appt.patient_name, error: err.message });
+    }
+    await new Promise(r => setTimeout(r, 1200)); // gentle pacing, avoid tripping Meta's rate limits
+  }
+  return summary;
+}
+
+// ---- POST /api/whatsapp/send-confirmations-now ----
+// The manual "press whenever you need it" alternative to the disabled
+// midnight scheduler. Defaults to tomorrow's appointments if no date is
+// given (matches what the scheduler would have sent).
+app.post('/api/whatsapp/send-confirmations-now', requireOwnerOrPermission('send_whatsapp'), async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const { date } = req.body || {};
+    let targetDate;
+    if (date) {
+      const [y, m, d] = date.split('-').map(Number);
+      targetDate = new Date(y, m - 1, d);
+    } else {
+      const nowCairo = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
+      targetDate = new Date(nowCairo.getFullYear(), nowCairo.getMonth(), nowCairo.getDate() + 1);
+    }
+    const summary = await sendConfirmationsForDate(targetDate);
+    res.json(summary);
+  } catch (err) {
+    console.error('Manual send-confirmations error:', err);
+    res.status(500).json({ error: 'Failed to send: ' + err.message });
+  }
+});
+
 // ---- Automatic midnight sending ----
 // Runs inside this same always-on process (kept awake by the UptimeRobot
 // monitor) — no separate cron infrastructure needed. Checks every 5
@@ -889,26 +943,8 @@ async function runMidnightAutoConfirmations() {
   console.log(`[auto-confirm] Running for ${todayKey}`);
   try {
     const tomorrow = new Date(nowCairo.getFullYear(), nowCairo.getMonth(), nowCairo.getDate() + 1);
-    const start = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 0, 0, 0);
-    const end = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 23, 59, 59);
-    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start.toISOString())}&start_time=lte.${encodeURIComponent(end.toISOString())}&status=neq.cancelled`;
-    const res = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
-    const appointments = await res.json();
-    if (!Array.isArray(appointments)) return;
-    for (const appt of appointments) {
-      if (!appt.patient_phone) continue;
-      const apptDate = new Date(appt.start_time);
-      const dateLabel = apptDate.toLocaleDateString('en-GB', { timeZone: 'Africa/Cairo', weekday: 'long', day: 'numeric', month: 'long' });
-      const timeLabel = apptDate.toLocaleTimeString('en-US', { timeZone: 'Africa/Cairo', hour: 'numeric', minute: '2-digit', hour12: true });
-      try {
-        await sendWhatsAppTemplate(appt.patient_phone, 'appointment_confirmation', [appt.patient_name || '', dateLabel, timeLabel]);
-        console.log(`[auto-confirm] Sent to ${appt.patient_name} (${appt.patient_phone})`);
-      } catch (err) {
-        console.error(`[auto-confirm] Failed for ${appt.patient_name} (${appt.patient_phone}):`, err.message);
-      }
-      await new Promise(r => setTimeout(r, 1200)); // gentle pacing, avoid tripping Meta's rate limits
-    }
-    console.log(`[auto-confirm] Done — ${appointments.length} appointment(s) checked.`);
+    const summary = await sendConfirmationsForDate(tomorrow);
+    console.log(`[auto-confirm] Done — ${summary.sent}/${summary.total} sent, ${summary.failed.length} failed.`);
   } catch (err) {
     console.error('[auto-confirm] Run failed:', err);
   }
