@@ -389,6 +389,22 @@ app.post('/api/intake', async (req, res) => {
 });
 
 // ---- GET /api/intake/unmatched-by-name ---- (staff-side lookup)
+// ---- GET /api/intake/all-unmatched ----
+// Every team member (not just the owner) can see the full list of
+// intake forms nobody has pulled into a session yet.
+app.get('/api/intake/all-unmatched', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/patient_intake_forms?matched=eq.false&order=submitted_at.desc&limit=50`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('All-unmatched intake error:', err);
+    res.status(500).json({ error: 'Failed to load: ' + err.message });
+  }
+});
+
 app.get('/api/intake/unmatched-by-name', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { name } = req.query;
