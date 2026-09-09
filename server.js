@@ -617,7 +617,7 @@ app.get('/api/appointments', requireApprovedAny, async (req, res) => {
 
 app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { patientName, startTime, endTime, doctorColor, doctorName, patientPhone } = req.body || {};
+  const { patientName, startTime, endTime, doctorColor, doctorName, patientPhone, visitType } = req.body || {};
   if (!patientName || !startTime || !endTime) return res.status(400).json({ error: 'Missing patientName, startTime, or endTime.' });
   // Secretaries manage the whole schedule as their job; a plain doctor
   // needs the manage_other_appointments permission to book under someone
@@ -644,6 +644,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
         doctor_color: doctorColor || req.doctor.color || null,
         doctor_name: effectiveDoctorName,
         patient_phone: patientPhone || null,
+        visit_type: visitType || 'session',
       }),
     });
     const data = await upstream.text();
@@ -693,7 +694,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
 // calendar too.
 app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status, paid } = req.body || {};
+  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status, paid, visitType } = req.body || {};
   const ownName = req.doctor.name || req.doctor.email;
 
   // Cancelling / restoring / no-show requires edit_cancel_appointments
@@ -721,6 +722,7 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (effectiveDoctorName !== undefined) patch.doctor_name = effectiveDoctorName || null;
   if (status !== undefined) patch.status = status;
   if (paid !== undefined) patch.paid = paid;
+  if (visitType !== undefined) patch.visit_type = visitType;
   if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to update.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
