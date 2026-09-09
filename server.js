@@ -1575,8 +1575,9 @@ app.post('/api/auth/change-password', requireApprovedAny, async (req, res) => {
 
 app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { name, color, email } = req.body || {};
+  const { name, color, email, role } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Missing doctor name.' });
+  const finalRole = role === 'secretary' ? 'secretary' : 'doctor';
   try {
     const already = await lookupManualDoctorByName(name);
     if (already) return res.status(409).json({ error: 'A doctor with that name is already on the roster.' });
@@ -1603,7 +1604,7 @@ app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
       body: JSON.stringify({
         email: finalEmail,
         name: name.trim(),
-        role: 'doctor',
+        role: finalRole,
         status: 'approved',
         color: color || null,
         approved_at: new Date().toISOString(),
