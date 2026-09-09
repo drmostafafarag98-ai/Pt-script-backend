@@ -877,7 +877,9 @@ app.post('/api/whatsapp/send-reminder', requireApprovedAny, async (req, res) => 
 // manual "send now" button — same logic either way, just triggered
 // differently. Returns a summary instead of just logging, so the manual
 // trigger can show the owner exactly what happened.
-async function sendConfirmationsForDate(targetDate) {
+async function sendConfirmationsForDate(targetDate, templateName) {
+  const finalTemplate = templateName || 'appointment_confirmation';
+  const noVariableTemplates = ['package_policy', 'recovery_session_policy'];
   const start = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0);
   const end = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59);
   const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start.toISOString())}&start_time=lte.${encodeURIComponent(end.toISOString())}&status=neq.cancelled`;
@@ -891,8 +893,9 @@ async function sendConfirmationsForDate(targetDate) {
     const apptDate = new Date(appt.start_time);
     const dateLabel = apptDate.toLocaleDateString('en-GB', { timeZone: 'Africa/Cairo', weekday: 'long', day: 'numeric', month: 'long' });
     const timeLabel = apptDate.toLocaleTimeString('en-US', { timeZone: 'Africa/Cairo', hour: 'numeric', minute: '2-digit', hour12: true });
+    const params = noVariableTemplates.includes(finalTemplate) ? [] : [appt.patient_name || '', dateLabel, timeLabel];
     try {
-      await sendWhatsAppTemplate(appt.patient_phone, 'appointment_confirmation', [appt.patient_name || '', dateLabel, timeLabel]);
+      await sendWhatsAppTemplate(appt.patient_phone, finalTemplate, params);
       summary.sent++;
     } catch (err) {
       summary.failed.push({ patient: appt.patient_name, error: err.message });
@@ -909,7 +912,7 @@ async function sendConfirmationsForDate(targetDate) {
 app.post('/api/whatsapp/send-confirmations-now', requireOwnerOrPermission('send_whatsapp'), async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
-    const { date } = req.body || {};
+    const { date, templateName } = req.body || {};
     let targetDate;
     if (date) {
       const [y, m, d] = date.split('-').map(Number);
@@ -918,7 +921,7 @@ app.post('/api/whatsapp/send-confirmations-now', requireOwnerOrPermission('send_
       const nowCairo = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
       targetDate = new Date(nowCairo.getFullYear(), nowCairo.getMonth(), nowCairo.getDate() + 1);
     }
-    const summary = await sendConfirmationsForDate(targetDate);
+    const summary = await sendConfirmationsForDate(targetDate, templateName);
     res.json(summary);
   } catch (err) {
     console.error('Manual send-confirmations error:', err);
