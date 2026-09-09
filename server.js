@@ -174,6 +174,29 @@ async function requireOwnerDoctor(req, res, next) {
   next();
 }
 
+// Owner always has every permission implicitly. Everyone else needs the
+// specific permission key set true on their own doctor row.
+function hasPermission(doctor, key) {
+  if (!doctor) return false;
+  if (doctor.role === 'owner') return true;
+  return !!(doctor.permissions && doctor.permissions[key] === true);
+}
+
+// Middleware factory: owner passes automatically; anyone else needs the
+// named permission set true on their account.
+function requireOwnerOrPermission(key) {
+  return async function (req, res, next) {
+    const token = extractBearerToken(req);
+    const email = await verifyGoogleToken(token);
+    if (!email) return res.status(401).json({ error: 'Sign in with Google required.' });
+    const doctor = await lookupDoctor(email);
+    if (!doctor || doctor.status !== 'approved') return res.status(403).json({ error: 'Approved account required.' });
+    if (!hasPermission(doctor, key)) return res.status(403).json({ error: `You don't have the "${key}" permission — ask the clinic owner to grant it.` });
+    req.doctor = doctor;
+    next();
+  };
+}
+
 // Owner or secretary — used for calendar-color management, since
 // secretaries handle the schedule day-to-day but shouldn't approve staff.
 async function requireOwnerOrSecretary(req, res, next) {
@@ -443,6 +466,9 @@ app.post('/api/intake/:id/mark-matched', requireApprovedAny, async (req, res) =>
 
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
+    return res.status(403).json({ error: 'You don\'t have permission to record payments — ask the clinic owner to grant it.' });
+  }
   const { patientName, totalSessions, startingUsed } = req.body || {};
   if (!patientName || !totalSessions || totalSessions < 1) return res.status(400).json({ error: 'Missing patientName or totalSessions.' });
   const used = Math.max(0, Math.min(totalSessions, parseInt(startingUsed, 10) || 0));
@@ -511,6 +537,9 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
 // ---- POST /api/packages/:id/use-session ---- (consume one session from the package)
 app.post('/api/packages/:id/use-session', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
+    return res.status(403).json({ error: 'You don\'t have permission to record payments — ask the clinic owner to grant it.' });
+  }
   try {
     const getUrl = `${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`;
     const getRes = await fetch(getUrl, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
@@ -590,6 +619,14 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { patientName, startTime, endTime, doctorColor, doctorName, patientPhone } = req.body || {};
   if (!patientName || !startTime || !endTime) return res.status(400).json({ error: 'Missing patientName, startTime, or endTime.' });
+  // Secretaries manage the whole schedule as their job; a plain doctor
+  // needs the manage_other_appointments permission to book under someone
+  // else's name — otherwise it's silently forced back to their own.
+  let effectiveDoctorName = doctorName || req.doctor.name || req.doctor.email;
+  const ownName = req.doctor.name || req.doctor.email;
+  if (doctorName && doctorName !== ownName && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'manage_other_appointments')) {
+    effectiveDoctorName = ownName;
+  }
   try {
     const url = `${SUPABASE_URL}/rest/v1/appointments`;
     const upstream = await fetch(url, {
@@ -605,7 +642,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
         start_time: startTime,
         end_time: endTime,
         doctor_color: doctorColor || req.doctor.color || null,
-        doctor_name: doctorName || req.doctor.name || req.doctor.email,
+        doctor_name: effectiveDoctorName,
         patient_phone: patientPhone || null,
       }),
     });
@@ -617,7 +654,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
     // booking response above.
     if (upstream.ok) {
       try {
-        const finalDoctorName = doctorName || req.doctor.name || req.doctor.email;
+        const finalDoctorName = effectiveDoctorName;
         const checkUrl = `${SUPABASE_URL}/rest/v1/sessions?patient_name=eq.${encodeURIComponent(patientName)}&doctor_name=eq.${encodeURIComponent(finalDoctorName)}&select=id&limit=1`;
         const checkRes = await fetch(checkUrl, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
         const existing = await checkRes.json();
@@ -657,13 +694,31 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
 app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status, paid } = req.body || {};
+  const ownName = req.doctor.name || req.doctor.email;
+
+  // Cancelling / restoring / no-show requires edit_cancel_appointments
+  // (owner and secretary always allowed — cancelling is core to running
+  // the schedule day-to-day).
+  if (status !== undefined && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'edit_cancel_appointments')) {
+    return res.status(403).json({ error: 'You don\'t have permission to cancel/restore appointments — ask the clinic owner to grant it.' });
+  }
+  // Marking paid/unpaid requires view_payments (owner/secretary exempt).
+  if (paid !== undefined && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
+    return res.status(403).json({ error: 'You don\'t have permission to record payments — ask the clinic owner to grant it.' });
+  }
+  // Reassigning to a different doctor requires manage_other_appointments.
+  let effectiveDoctorName = doctorName;
+  if (doctorName !== undefined && doctorName !== ownName && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'manage_other_appointments')) {
+    effectiveDoctorName = ownName;
+  }
+
   const patch = {};
   if (patientName !== undefined) patch.patient_name = patientName;
   if (patientPhone !== undefined) patch.patient_phone = patientPhone || null;
   if (startTime !== undefined) patch.start_time = startTime;
   if (endTime !== undefined) patch.end_time = endTime;
   if (doctorColor !== undefined) patch.doctor_color = doctorColor || null;
-  if (doctorName !== undefined) patch.doctor_name = doctorName || null;
+  if (effectiveDoctorName !== undefined) patch.doctor_name = effectiveDoctorName || null;
   if (status !== undefined) patch.status = status;
   if (paid !== undefined) patch.paid = paid;
   if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to update.' });
@@ -1049,6 +1104,11 @@ app.get('/api/sessions', requireApprovedDoctor, async (req, res) => {
     let url = `${SUPABASE_URL}/rest/v1/sessions?order=${order === 'asc' ? 'created_at.asc' : 'created_at.desc'}`;
     if (patientName) {
       url += `&patient_name=ilike.${encodeURIComponent('%' + patientName + '%')}`;
+    }
+    // Without view_other_patients, a doctor only sees their OWN patients'
+    // files — not the whole clinic's.
+    if (!hasPermission(req.doctor, 'view_other_patients')) {
+      url += `&doctor_name=eq.${encodeURIComponent(req.doctor.name || req.doctor.email)}`;
     }
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const data = await upstream.text();
@@ -1573,7 +1633,7 @@ app.post('/api/auth/change-password', requireApprovedAny, async (req, res) => {
   }
 });
 
-app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
+app.post('/api/doctors/manual', requireOwnerOrPermission('manage_team'), async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { name, color, email, role } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Missing doctor name.' });
@@ -1630,7 +1690,7 @@ app.post('/api/doctors/manual', requireOwnerDoctor, async (req, res) => {
 // KEEP (its name/color/history survive) and which to REMOVE; whichever
 // of the two has a real email (not @empower.local) becomes the surviving
 // row's email, so future sign-ins map correctly.
-app.post('/api/doctors/merge', requireOwnerDoctor, async (req, res) => {
+app.post('/api/doctors/merge', requireOwnerOrPermission('manage_team'), async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { keepEmail, removeEmail } = req.body || {};
   if (!keepEmail || !removeEmail || keepEmail === removeEmail) {
@@ -1691,7 +1751,7 @@ app.post('/api/doctors/merge', requireOwnerDoctor, async (req, res) => {
   }
 });
 
-app.get('/api/doctors', requireOwnerDoctor, async (req, res) => {
+app.get('/api/doctors', requireOwnerOrPermission('manage_team'), async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/doctors?order=requested_at.desc`;
@@ -1725,6 +1785,33 @@ app.get('/api/doctors/colors', requireApprovedAny, async (req, res) => {
 // the owner can, say, give a trusted secretary access without making
 // them an owner, or keep it from a doctor who shouldn't see clinic-wide
 // financials.
+// ---- POST /api/doctors/:email/permissions ----
+// Owner sets the granular permissions object for a team member. Body is
+// the full set of booleans, e.g. { view_payments: true, send_whatsapp:
+// false, ... } — always replaces the whole object (simpler than partial
+// patches, and the frontend always sends the complete checklist anyway).
+app.post('/api/doctors/:email/permissions', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { permissions } = req.body || {};
+  if (!permissions || typeof permissions !== 'object') return res.status(400).json({ error: 'Missing permissions object.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`;
+    const upstream = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ permissions }),
+    });
+    res.status(upstream.status).json({ ok: upstream.ok });
+  } catch (err) {
+    console.error('Set-permissions error:', err);
+    res.status(500).json({ error: 'Failed to update permissions: ' + err.message });
+  }
+});
+
 app.post('/api/doctors/:email/dashboard-access', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { canView } = req.body || {};
@@ -1792,7 +1879,7 @@ app.post('/api/doctors/:email/color', requireOwnerOrSecretary, async (req, res) 
   }
 });
 
-app.post('/api/doctors/:email/approve', requireOwnerDoctor, async (req, res) => {
+app.post('/api/doctors/:email/approve', requireOwnerOrPermission('manage_team'), async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { role } = req.body || {};
   const assignedRole = role === 'secretary' ? 'secretary' : role === 'owner' ? 'owner' : 'doctor';
@@ -1814,7 +1901,7 @@ app.post('/api/doctors/:email/approve', requireOwnerDoctor, async (req, res) => 
   }
 });
 
-app.post('/api/doctors/:email/reject', requireOwnerDoctor, async (req, res) => {
+app.post('/api/doctors/:email/reject', requireOwnerOrPermission('manage_team'), async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`;
