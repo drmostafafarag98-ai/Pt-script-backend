@@ -464,6 +464,63 @@ app.post('/api/intake/:id/mark-matched', requireApprovedAny, async (req, res) =>
   }
 });
 
+// ---- Doctor unavailability (e.g. "Dr X is off this day") ----
+// GET /api/doctor-unavailability?start=X&end=Y — for highlighting the
+// month grid; POST to mark a doctor unavailable on a date; DELETE to
+// un-mark.
+app.get('/api/doctor-unavailability', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  try {
+    let url = `${SUPABASE_URL}/rest/v1/doctor_unavailability?order=date.asc`;
+    if (start && end) url += `&date=gte.${encodeURIComponent(start)}&date=lte.${encodeURIComponent(end)}`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Doctor-unavailability GET error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.post('/api/doctor-unavailability', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { doctorName, date } = req.body || {};
+  if (!doctorName || !date) return res.status(400).json({ error: 'Missing doctorName or date.' });
+  try {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctor_unavailability`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation,resolution=merge-duplicates',
+      },
+      body: JSON.stringify({ doctor_name: doctorName, date }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) throw new Error(JSON.stringify(inserted));
+    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+  } catch (err) {
+    console.error('Doctor-unavailability POST error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.delete('/api/doctor-unavailability/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/doctor_unavailability?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Doctor-unavailability DELETE error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
