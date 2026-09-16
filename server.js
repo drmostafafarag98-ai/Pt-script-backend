@@ -529,6 +529,9 @@ app.post('/api/packages', requireApprovedAny, async (req, res) => {
   const { patientName, totalSessions, startingUsed } = req.body || {};
   if (!patientName || !totalSessions || totalSessions < 1) return res.status(400).json({ error: 'Missing patientName or totalSessions.' });
   const used = Math.max(0, Math.min(totalSessions, parseInt(startingUsed, 10) || 0));
+  if (used > 0 && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'register_packages')) {
+    return res.status(403).json({ error: 'You don\'t have permission to backfill an existing package — ask the clinic owner to grant it.' });
+  }
   try {
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/packages`, {
       method: 'POST',
