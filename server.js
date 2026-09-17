@@ -1334,6 +1334,52 @@ app.post('/api/sessions/merge', requireApprovedDoctor, async (req, res) => {
   }
 });
 
+// ---- PATCH /api/sessions/rename-patient ---- merges a misspelled patient
+// name's sessions into the correct one (same trimmed-match approach as
+// rename-doctor above).
+app.patch('/api/sessions/rename-patient', requireApprovedDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { fromName, toName } = req.body || {};
+  if (!fromName || !toName) return res.status(400).json({ error: 'Missing fromName or toName.' });
+  try {
+    const allRes = await fetch(`${SUPABASE_URL}/rest/v1/sessions?select=id,patient_name`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const allSessions = await allRes.json();
+    if (!allRes.ok) {
+      console.error('Session rename-patient: could not list sessions', allRes.status, allSessions);
+      return res.status(500).json({ error: 'Could not read sessions to merge.' });
+    }
+    const target = fromName.trim();
+    const matchingIds = (allSessions || [])
+      .filter(s => (s.patient_name || '').trim() === target)
+      .map(s => s.id);
+    if (matchingIds.length === 0) {
+      return res.status(404).json({ error: `No sessions found under "${fromName}" (nothing to merge).` });
+    }
+    const idList = matchingIds.map(id => `"${id}"`).join(',');
+    const updateRes = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=in.(${idList})`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ patient_name: toName.trim() }),
+    });
+    const data = await updateRes.json();
+    if (!updateRes.ok) {
+      console.error('Session rename-patient failed:', updateRes.status, data);
+      return res.status(500).json({ error: 'Failed to merge sessions.' });
+    }
+    res.json({ ok: true, count: Array.isArray(data) ? data.length : 0 });
+  } catch (err) {
+    console.error('Session rename-patient error:', err);
+    res.status(500).json({ error: 'Failed to merge sessions: ' + err.message });
+  }
+});
+
 app.patch('/api/sessions/rename-doctor', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { fromName, toName } = req.body || {};
