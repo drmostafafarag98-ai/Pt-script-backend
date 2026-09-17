@@ -483,6 +483,65 @@ app.get('/api/doctor-unavailability', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- Clinic expenses ----
+app.get('/api/expenses', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  try {
+    let url = `${SUPABASE_URL}/rest/v1/expenses?order=expense_date.desc`;
+    if (start && end) url += `&expense_date=gte.${encodeURIComponent(start)}&expense_date=lte.${encodeURIComponent(end)}`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Expenses GET error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.post('/api/expenses', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { description, amount, expenseDate } = req.body || {};
+  if (!description || !amount) return res.status(400).json({ error: 'Missing description or amount.' });
+  try {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/expenses`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        description,
+        amount,
+        expense_date: expenseDate || new Date().toISOString().slice(0, 10),
+        created_by: req.doctor.name || req.doctor.email,
+      }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) throw new Error(JSON.stringify(inserted));
+    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+  } catch (err) {
+    console.error('Expenses POST error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.delete('/api/expenses/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/expenses?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Expenses DELETE error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 app.post('/api/doctor-unavailability', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { doctorName, date } = req.body || {};
@@ -872,7 +931,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
 // calendar too.
 app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status, paid, visitType } = req.body || {};
+  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status, paid, visitType, isFree } = req.body || {};
   const ownName = req.doctor.name || req.doctor.email;
 
   // Cancelling / restoring / no-show requires edit_cancel_appointments
@@ -881,8 +940,8 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (status !== undefined && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'edit_cancel_appointments')) {
     return res.status(403).json({ error: 'You don\'t have permission to cancel/restore appointments — ask the clinic owner to grant it.' });
   }
-  // Marking paid/unpaid requires view_payments (owner/secretary exempt).
-  if (paid !== undefined && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
+  // Marking paid/unpaid/free requires view_payments (owner/secretary exempt).
+  if ((paid !== undefined || isFree !== undefined) && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
     return res.status(403).json({ error: 'You don\'t have permission to record payments — ask the clinic owner to grant it.' });
   }
   // Reassigning to a different doctor requires manage_other_appointments.
@@ -901,6 +960,7 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (status !== undefined) patch.status = status;
   if (paid !== undefined) patch.paid = paid;
   if (visitType !== undefined) patch.visit_type = visitType;
+  if (isFree !== undefined){ patch.is_free = isFree; if(isFree) patch.paid = true; }
   if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to update.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
@@ -1235,6 +1295,45 @@ app.post('/api/appointments/:id/notes', requireApprovedAny, async (req, res) => 
 // owner fix the sidebar showing the same person's sessions split across
 // several name spellings, by bulk-renaming every session under fromName
 // to toName in one go.
+// ---- POST /api/sessions/merge ---- combine two session "files" into one
+app.post('/api/sessions/merge', requireApprovedDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { keepId, removeId } = req.body || {};
+  if (!keepId || !removeId) return res.status(400).json({ error: 'Missing keepId or removeId.' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const [keepRes, removeRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(keepId)}`, { headers }),
+      fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(removeId)}`, { headers }),
+    ]);
+    const [keepRows, removeRows] = await Promise.all([keepRes.json(), removeRes.json()]);
+    const keepSession = Array.isArray(keepRows) && keepRows[0];
+    const removeSession = Array.isArray(removeRows) && removeRows[0];
+    if (!keepSession || !removeSession) return res.status(404).json({ error: 'One or both sessions not found.' });
+
+    const mergedNote = [keepSession.note, removeSession.note].filter(Boolean).join('\n\n---\n\n');
+    const mergedTranscript = [...(keepSession.transcript || []), ...(removeSession.transcript || [])];
+
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(keepId)}`, {
+      method: 'PATCH',
+      headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify({ note: mergedNote, transcript: mergedTranscript, updated_at: new Date().toISOString() }),
+    });
+    if (!patchRes.ok) throw new Error(await patchRes.text());
+
+    await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(removeId)}`, {
+      method: 'DELETE',
+      headers,
+    });
+
+    const updated = await patchRes.json();
+    res.json(Array.isArray(updated) ? updated[0] : updated);
+  } catch (err) {
+    console.error('Session merge error:', err);
+    res.status(500).json({ error: 'Failed to merge sessions: ' + err.message });
+  }
+});
+
 app.patch('/api/sessions/rename-doctor', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { fromName, toName } = req.body || {};
