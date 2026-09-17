@@ -521,6 +521,124 @@ app.delete('/api/doctor-unavailability/:id', requireApprovedAny, async (req, res
   }
 });
 
+// ---- TimeTree / generic iCal import ----
+// TimeTree's own "Share calendar" feature gives a read-only iCal
+// (webcal://... or https://...ics) feed — this is the only officially
+// supported way to get data out of TimeTree (their real API was shut
+// down in Dec 2023). We fetch + parse that feed server-side (avoids
+// CORS) and hand back a plain list of events for the owner to review
+// before anything is imported — nothing is written automatically.
+
+function parseIcs(icsText) {
+  // Unfold lines per RFC 5545 (a line starting with a space/tab is a
+  // continuation of the previous line).
+  const rawLines = icsText.split(/\r\n|\n|\r/);
+  const lines = [];
+  rawLines.forEach((line) => {
+    if ((line.startsWith(' ') || line.startsWith('\t')) && lines.length > 0) {
+      lines[lines.length - 1] += line.slice(1);
+    } else {
+      lines.push(line);
+    }
+  });
+
+  function parseIcsDate(val) {
+    // Handles YYYYMMDD or YYYYMMDDTHHMMSS(Z)
+    const m = val.match(/^(\d{4})(\d{2})(\d{2})(T(\d{2})(\d{2})(\d{2})Z?)?$/);
+    if (!m) return null;
+    const [, y, mo, d, , h, mi, s] = m;
+    if (h === undefined) return `${y}-${mo}-${d}`; // all-day, date only
+    return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s)).toISOString();
+  }
+
+  const events = [];
+  let current = null;
+  lines.forEach((line) => {
+    if (line === 'BEGIN:VEVENT') {
+      current = {};
+    } else if (line === 'END:VEVENT') {
+      if (current && current.summary) events.push(current);
+      current = null;
+    } else if (current) {
+      const idx = line.indexOf(':');
+      if (idx === -1) return;
+      const rawKey = line.slice(0, idx);
+      const key = rawKey.split(';')[0];
+      const val = line.slice(idx + 1);
+      if (key === 'SUMMARY') current.summary = val.replace(/\\,/g, ',').replace(/\\n/gi, ' ').trim();
+      else if (key === 'DTSTART') current.start = parseIcsDate(val);
+      else if (key === 'DTEND') current.end = parseIcsDate(val);
+      else if (key === 'LOCATION') current.location = val;
+      else if (key === 'UID') current.uid = val;
+    }
+  });
+  return events;
+}
+
+// ---- POST /api/timetree/preview ---- ({ icalUrl }) — read-only, parses and returns events
+app.post('/api/timetree/preview', requireApprovedAny, async (req, res) => {
+  const { icalUrl, icsText } = req.body || {};
+  if (!icalUrl && !icsText) return res.status(400).json({ error: 'Provide either icalUrl or icsText.' });
+  try {
+    let text = icsText;
+    if (!text) {
+      const fetchUrl = icalUrl.replace(/^webcal:\/\//i, 'https://');
+      const upstream = await fetch(fetchUrl);
+      if (!upstream.ok) throw new Error(`Could not fetch the calendar (HTTP ${upstream.status}). Double check the link.`);
+      text = await upstream.text();
+    }
+    const events = parseIcs(text);
+    // Only future/recent events — no point reviewing years of history.
+    const cutoff = Date.now() - 1000 * 60 * 60 * 24 * 30; // last 30 days onward
+    const filtered = events.filter((e) => {
+      if (!e.start) return false;
+      const t = new Date(e.start).getTime();
+      return !isNaN(t) && t >= cutoff;
+    }).sort((a, b) => new Date(a.start) - new Date(b.start));
+    res.json({ count: filtered.length, events: filtered.slice(0, 300) });
+  } catch (err) {
+    console.error('TimeTree preview error:', err);
+    res.status(500).json({ error: 'Failed to read that calendar: ' + err.message });
+  }
+});
+
+// ---- POST /api/timetree/import ---- ({ events: [{summary, start, end, patientName?, doctorName?}] })
+app.post('/api/timetree/import', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { events } = req.body || {};
+  if (!Array.isArray(events) || events.length === 0) return res.status(400).json({ error: 'No events to import.' });
+  let imported = 0;
+  const errors = [];
+  for (const ev of events) {
+    const patientName = (ev.patientName || ev.summary || '').trim();
+    if (!patientName || !ev.start) { errors.push(`Skipped one event — missing name or date.`); continue; }
+    const start = ev.start;
+    const end = ev.end || new Date(new Date(start).getTime() + 30 * 60000).toISOString();
+    try {
+      const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/appointments`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          patient_name: patientName,
+          start_time: start,
+          end_time: end,
+          doctor_name: ev.doctorName || req.doctor.name || req.doctor.email,
+          doctor_color: req.doctor.color || null,
+        }),
+      });
+      if (insertRes.ok) imported++;
+      else errors.push(`Failed to import "${patientName}".`);
+    } catch (e) {
+      errors.push(`Failed to import "${patientName}": ${e.message}`);
+    }
+  }
+  res.json({ imported, errors });
+});
+
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
