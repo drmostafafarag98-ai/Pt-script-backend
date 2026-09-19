@@ -949,6 +949,32 @@ app.get('/api/appointments/unpaid-by-patient', requireApprovedAny, async (req, r
   }
 });
 
+// ---- DELETE /api/appointments/delete-day ---- (?start=ISO&end=ISO) owner-only,
+// permanently deletes every appointment whose start_time falls in that
+// range (the frontend computes the local day's start/end). Irreversible.
+app.delete('/api/appointments/delete-day', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  if (!start || !end) return res.status(400).json({ error: 'Missing start or end.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}`;
+    const delRes = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        Prefer: 'return=representation',
+      },
+    });
+    const data = await delRes.json();
+    if (!delRes.ok) throw new Error(JSON.stringify(data));
+    res.json({ ok: true, deleted: Array.isArray(data) ? data.length : 0 });
+  } catch (err) {
+    console.error('Delete-day error:', err);
+    res.status(500).json({ error: 'Failed to delete: ' + err.message });
+  }
+});
+
 app.get('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
