@@ -718,7 +718,7 @@ app.post('/api/timetree/parse-screenshot', requireApprovedAny, async (req, res) 
       body: JSON.stringify({
         model: 'claude-sonnet-5',
         max_tokens: 2000,
-        system: `You read screenshots of calendar apps (like TimeTree) and extract each visible appointment/event as JSON. Today's date is ${todayStr}. Respond with ONLY a raw JSON array, no markdown fences, no commentary. Each item: {"summary": "<patient or event name>", "start": "<ISO 8601 datetime, your best inference of the full date+time using today's date as reference for any relative/partial dates shown>"}. If a year isn't shown, assume the current or nearest upcoming year. If you can't confidently read an item, skip it rather than guessing.`,
+        system: `You read screenshots of calendar apps (like TimeTree) and extract each visible appointment/event as JSON. Today's date is ${todayStr}. Each event has a colored bar or dot next to it — classify that color as exactly one of: "pink" (pink/magenta/light red), "green", "blue", "yellow" (yellow/gold/orange), "purple" (purple/lavender), "black" (black/very dark), "gray" (medium gray), or "unknown" if you can't tell. Respond with ONLY a raw JSON array, no markdown fences, no commentary. Each item: {"summary": "<patient or event name>", "start": "<ISO 8601 datetime, your best inference of the full date+time using today's date as reference for any relative/partial dates shown>", "color": "<one of the color words above>"}. If a year isn't shown, assume the current or nearest upcoming year. If you can't confidently read an item, skip it rather than guessing.`,
         messages: [{
           role: 'user',
           content: [
