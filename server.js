@@ -343,7 +343,7 @@ app.post('/api/settings/:key', requireOwnerOrSecretary, async (req, res) => {
 app.get('/api/patients', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/appointments?select=patient_name,patient_phone,start_time&order=start_time.desc&limit=1000`;
+    const url = `${SUPABASE_URL}/rest/v1/appointments?select=patient_name,patient_phone,start_time&deleted_at=is.null&order=start_time.desc&limit=1000`;
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const rows = await upstream.json();
     if (!upstream.ok) {
@@ -779,13 +779,32 @@ app.post('/api/timetree/import', requireApprovedAny, async (req, res) => {
   const { events } = req.body || {};
   if (!Array.isArray(events) || events.length === 0) return res.status(400).json({ error: 'No events to import.' });
   let imported = 0;
+  let phoneFilled = 0;
   const errors = [];
+  const phoneCache = {}; // patientName (lowercased, trimmed) -> phone or null, so we only look each name up once per batch
   for (const ev of events) {
     const patientName = (ev.patientName || ev.summary || '').trim();
     if (!patientName || !ev.start) { errors.push(`Skipped one event — missing name or date.`); continue; }
     const start = ev.start;
     const end = ev.end || new Date(new Date(start).getTime() + 30 * 60000).toISOString();
     try {
+      // TimeTree screenshots never show a phone number, so look up this
+      // patient's most recent one from their own appointment history
+      // (if they've been in before) rather than leaving it blank.
+      const cacheKey = patientName.toLowerCase();
+      let patientPhone = ev.patientPhone || null;
+      if (!patientPhone) {
+        if (cacheKey in phoneCache) {
+          patientPhone = phoneCache[cacheKey];
+        } else {
+          const phoneUrl = `${SUPABASE_URL}/rest/v1/appointments?patient_name=eq.${encodeURIComponent(patientName)}&patient_phone=not.is.null&deleted_at=is.null&select=patient_phone&order=start_time.desc&limit=1`;
+          const phoneRes = await fetch(phoneUrl, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+          const phoneRows = await phoneRes.json();
+          patientPhone = (Array.isArray(phoneRows) && phoneRows[0] && phoneRows[0].patient_phone) || null;
+          phoneCache[cacheKey] = patientPhone;
+        }
+        if (patientPhone) phoneFilled++;
+      }
       const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/appointments`, {
         method: 'POST',
         headers: {
@@ -795,6 +814,7 @@ app.post('/api/timetree/import', requireApprovedAny, async (req, res) => {
         },
         body: JSON.stringify({
           patient_name: patientName,
+          patient_phone: patientPhone,
           start_time: start,
           end_time: end,
           doctor_name: ev.doctorName || req.doctor.name || req.doctor.email,
@@ -807,7 +827,7 @@ app.post('/api/timetree/import', requireApprovedAny, async (req, res) => {
       errors.push(`Failed to import "${patientName}": ${e.message}`);
     }
   }
-  res.json({ imported, errors });
+  res.json({ imported, errors, phoneFilled });
 });
 
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
@@ -857,7 +877,7 @@ app.get('/api/appointments/no-show-count', requireApprovedAny, async (req, res) 
   const { patientName } = req.query;
   if (!patientName) return res.status(400).json({ error: 'Missing patientName.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=eq.${encodeURIComponent(patientName)}&status=eq.no_show&select=id`;
+    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=eq.${encodeURIComponent(patientName)}&status=eq.no_show&deleted_at=is.null&select=id`;
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, Prefer: 'count=exact' } });
     const rows = await upstream.json();
     res.json({ count: Array.isArray(rows) ? rows.length : 0 });
@@ -924,7 +944,7 @@ app.get('/api/appointments/search-by-patient', requireApprovedAny, async (req, r
   const { q } = req.query;
   if (!q || q.trim().length < 2) return res.status(400).json({ error: 'Search term must be at least 2 characters.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=ilike.*${encodeURIComponent(q.trim())}*&order=start_time.desc&limit=30`;
+    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=ilike.*${encodeURIComponent(q.trim())}*&deleted_at=is.null&order=start_time.desc&limit=30`;
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
@@ -939,7 +959,7 @@ app.get('/api/appointments/unpaid-by-patient', requireApprovedAny, async (req, r
   const { patientName } = req.query;
   if (!patientName) return res.status(400).json({ error: 'Missing patientName.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=eq.${encodeURIComponent(patientName)}&paid=eq.false&status=neq.cancelled&order=start_time.desc&limit=20`;
+    const url = `${SUPABASE_URL}/rest/v1/appointments?patient_name=eq.${encodeURIComponent(patientName)}&paid=eq.false&status=neq.cancelled&deleted_at=is.null&order=start_time.desc&limit=20`;
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
@@ -949,22 +969,24 @@ app.get('/api/appointments/unpaid-by-patient', requireApprovedAny, async (req, r
   }
 });
 
-// ---- DELETE /api/appointments/delete-day ---- (?start=ISO&end=ISO) owner-only,
-// permanently deletes every appointment whose start_time falls in that
-// range (the frontend computes the local day's start/end). Irreversible.
+// ---- DELETE /api/appointments/delete-day ---- (?start=ISO&end=ISO) owner-only.
+// SOFT delete: sets deleted_at instead of removing rows, so it can be
+// undone from the trash within 7 days.
 app.delete('/api/appointments/delete-day', requireOwnerDoctor, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
   if (!start || !end) return res.status(400).json({ error: 'Missing start or end.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}`;
+    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}&deleted_at=is.null`;
     const delRes = await fetch(url, {
-      method: 'DELETE',
+      method: 'PATCH',
       headers: {
         apikey: SUPABASE_SERVICE_KEY,
         Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
+      body: JSON.stringify({ deleted_at: new Date().toISOString() }),
     });
     const data = await delRes.json();
     if (!delRes.ok) throw new Error(JSON.stringify(data));
@@ -975,12 +997,55 @@ app.delete('/api/appointments/delete-day', requireOwnerDoctor, async (req, res) 
   }
 });
 
+// ---- GET /api/appointments/trash ---- owner-only, lists soft-deleted
+// appointments from the last 7 days, grouped by the day they were on.
+app.get('/api/appointments/trash', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const url = `${SUPABASE_URL}/rest/v1/appointments?deleted_at=gte.${encodeURIComponent(cutoff)}&order=deleted_at.desc,start_time.asc`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Trash GET error:', err);
+    res.status(500).json({ error: 'Failed to load trash: ' + err.message });
+  }
+});
+
+// ---- POST /api/appointments/restore-day ---- (?start=ISO&end=ISO) owner-only,
+// undoes a delete-day within the 7-day window.
+app.post('/api/appointments/restore-day', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  if (!start || !end) return res.status(400).json({ error: 'Missing start or end.' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}&deleted_at=not.is.null`;
+    const restoreRes = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ deleted_at: null }),
+    });
+    const data = await restoreRes.json();
+    if (!restoreRes.ok) throw new Error(JSON.stringify(data));
+    res.json({ ok: true, restored: Array.isArray(data) ? data.length : 0 });
+  } catch (err) {
+    console.error('Restore-day error:', err);
+    res.status(500).json({ error: 'Failed to restore: ' + err.message });
+  }
+});
+
 app.get('/api/appointments', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
   if (!start || !end) return res.status(400).json({ error: 'Missing start or end query params.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}&order=start_time.asc`;
+    const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}&deleted_at=is.null&order=start_time.asc`;
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
@@ -1262,7 +1327,7 @@ async function sendConfirmationsForDate(targetDate, templateName) {
   const noVariableTemplates = ['package_policy', 'recovery_session_policy'];
   const start = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 0, 0, 0);
   const end = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59);
-  const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start.toISOString())}&start_time=lte.${encodeURIComponent(end.toISOString())}&status=neq.cancelled`;
+  const url = `${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start.toISOString())}&start_time=lte.${encodeURIComponent(end.toISOString())}&status=neq.cancelled&deleted_at=is.null`;
   const res = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
   const appointments = await res.json();
   const summary = { total: 0, sent: 0, skippedNoPhone: 0, failed: [] };
