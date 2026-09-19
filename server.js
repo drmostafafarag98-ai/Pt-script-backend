@@ -698,6 +698,55 @@ function parseIcs(icsText) {
 }
 
 // ---- POST /api/timetree/preview ---- ({ icalUrl }) — read-only, parses and returns events
+// ---- POST /api/timetree/parse-screenshot ---- ({ imageBase64, mediaType }) —
+// uses Claude's vision to read a TimeTree (or any calendar) screenshot and
+// extract a list of events, in the same shape /preview returns, so the
+// frontend can reuse the same review/select/import flow either way.
+app.post('/api/timetree/parse-screenshot', requireApprovedAny, async (req, res) => {
+  if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: 'Server is missing ANTHROPIC_API_KEY.' });
+  const { imageBase64, mediaType } = req.body || {};
+  if (!imageBase64) return res.status(400).json({ error: 'Missing imageBase64.' });
+  try {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-5',
+        max_tokens: 2000,
+        system: `You read screenshots of calendar apps (like TimeTree) and extract each visible appointment/event as JSON. Today's date is ${todayStr}. Respond with ONLY a raw JSON array, no markdown fences, no commentary. Each item: {"summary": "<patient or event name>", "start": "<ISO 8601 datetime, your best inference of the full date+time using today's date as reference for any relative/partial dates shown>"}. If a year isn't shown, assume the current or nearest upcoming year. If you can't confidently read an item, skip it rather than guessing.`,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imageBase64 } },
+            { type: 'text', text: 'Extract every appointment/event visible in this calendar screenshot as the JSON array described.' },
+          ],
+        }],
+      }),
+    });
+    const data = await upstream.json();
+    if (!upstream.ok) return res.status(upstream.status).json({ error: JSON.stringify(data).slice(0, 300) });
+    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    let events = [];
+    try {
+      const cleaned = text.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+      events = JSON.parse(cleaned);
+    } catch (parseErr) {
+      console.error('Could not parse Claude screenshot response as JSON:', text);
+      return res.status(500).json({ error: 'Could not read structured events from that screenshot — try a clearer photo.' });
+    }
+    if (!Array.isArray(events)) events = [];
+    res.json({ count: events.length, events });
+  } catch (err) {
+    console.error('TimeTree screenshot parse error:', err);
+    res.status(500).json({ error: 'Failed to read the screenshot: ' + err.message });
+  }
+});
+
 app.post('/api/timetree/preview', requireApprovedAny, async (req, res) => {
   const { icalUrl, icsText } = req.body || {};
   if (!icalUrl && !icsText) return res.status(400).json({ error: 'Provide either icalUrl or icsText.' });
@@ -1021,6 +1070,8 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (doctorColor !== undefined) patch.doctor_color = doctorColor || null;
   if (effectiveDoctorName !== undefined) patch.doctor_name = effectiveDoctorName || null;
   if (status !== undefined) patch.status = status;
+  if (status === 'cancelled') patch.cancelled_at = new Date().toISOString();
+  else if (status !== undefined) patch.cancelled_at = null; // restoring or any other status clears it
   if (paid !== undefined) patch.paid = paid;
   if (visitType !== undefined) patch.visit_type = visitType;
   if (isFree !== undefined){ patch.is_free = isFree; if(isFree) patch.paid = true; }
