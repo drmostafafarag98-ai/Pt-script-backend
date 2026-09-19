@@ -798,7 +798,7 @@ app.post('/api/timetree/import', requireApprovedAny, async (req, res) => {
           start_time: start,
           end_time: end,
           doctor_name: ev.doctorName || req.doctor.name || req.doctor.email,
-          doctor_color: req.doctor.color || null,
+          doctor_color: ev.doctorColor || req.doctor.color || null,
         }),
       });
       if (insertRes.ok) imported++;
