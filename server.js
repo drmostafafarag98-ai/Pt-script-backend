@@ -647,6 +647,30 @@ app.post('/api/expenses', requireApprovedAny, async (req, res) => {
   }
 });
 
+app.patch('/api/expenses/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { paymentMethod } = req.body || {};
+  if (paymentMethod !== 'cash' && paymentMethod !== 'instapay') return res.status(400).json({ error: 'paymentMethod must be cash or instapay.' });
+  try {
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/expenses?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ payment_method: paymentMethod }),
+    });
+    const data = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(data));
+    res.json(Array.isArray(data) ? data[0] : data);
+  } catch (err) {
+    console.error('Expenses PATCH error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 app.delete('/api/expenses/:id', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   try {
