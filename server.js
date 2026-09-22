@@ -484,6 +484,113 @@ app.get('/api/doctor-unavailability', requireApprovedAny, async (req, res) => {
 });
 
 // ---- Clinic expenses ----
+// ---- GET /api/payroll ---- (?start=ISO&end=ISO) owner-only. Computes each
+// doctor's pay for the period using the clinic's actual compensation rules:
+// - Partners (Mostafa Farag, Youssef, Omnia Ahmed): 50% of their own
+//   collected revenue, PLUS an equal 3-way split of net profit
+//   (total collected − total expenses − everyone's payout).
+// - Zeinab: fixed 3500 + 75/session. Menna: fixed 4000 + 50/session.
+// - Marwa: 50% of her own collected revenue (not a partner, no profit share).
+// Matching a doctor_name to a rule is done by a lowercase keyword so small
+// spelling variations in doctor_name still resolve correctly.
+const PAYROLL_RULES = [
+  { keyword: 'mostafa', kind: 'partner', label: 'Dr. Mostafa Farag' },
+  { keyword: 'youssef', kind: 'partner', label: 'Dr. Youssef' },
+  { keyword: 'omnia', kind: 'partner', label: 'Dr. Omnia Ahmed' },
+  { keyword: 'zeinab', kind: 'fixed_plus_rate', fixed: 3500, rate: 75, label: 'Dr. Zeinab' },
+  { keyword: 'menna', kind: 'fixed_plus_rate', fixed: 4000, rate: 50, label: 'Dr. Menna Azzam' },
+  { keyword: 'marwa', kind: 'revenue_share', label: 'Dr. Marwa' },
+];
+function matchPayrollRule(doctorName) {
+  const lower = (doctorName || '').toLowerCase();
+  return PAYROLL_RULES.find((r) => lower.includes(r.keyword)) || null;
+}
+
+app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  if (!start || !end) return res.status(400).json({ error: 'Missing start or end.' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const [apptRes, expRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}&deleted_at=is.null&status=neq.cancelled`, { headers }),
+      fetch(`${SUPABASE_URL}/rest/v1/expenses?expense_date=gte.${encodeURIComponent(start.slice(0, 10))}&expense_date=lte.${encodeURIComponent(end.slice(0, 10))}`, { headers }),
+    ]);
+    const appointments = await apptRes.json();
+    const expenses = await expRes.json();
+    if (!Array.isArray(appointments) || !Array.isArray(expenses)) {
+      return res.status(500).json({ error: 'Could not read appointments or expenses for this range.' });
+    }
+
+    // Revenue per doctor: sum of the numeric amount in each "Paid X EGP
+    // (Cash/InstaPay)" note on their paid, non-free appointments — the
+    // same figures the Dashboard's money cards already rely on.
+    const revenueByDoctor = {};
+    const sessionsByDoctor = {};
+    appointments.forEach((ev) => {
+      const doctorName = ev.doctor_name || 'Unassigned';
+      sessionsByDoctor[doctorName] = (sessionsByDoctor[doctorName] || 0) + 1;
+      if (!ev.paid || ev.is_free) return;
+      const notes = ev.notes || [];
+      let amount = 0;
+      notes.forEach((n) => {
+        const m = (n.text || '').match(/^paid\s+([\d.,]+)\s*egp\s*\((cash|instapay)\)/i);
+        if (m) amount = parseFloat(m[1].replace(/,/g, ''));
+      });
+      revenueByDoctor[doctorName] = (revenueByDoctor[doctorName] || 0) + amount;
+    });
+
+    const totalExpenses = expenses.reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
+    const totalRevenue = Object.values(revenueByDoctor).reduce((a, b) => a + b, 0);
+
+    const rows = [];
+    let totalPayout = 0;
+    const partnerRows = [];
+    Object.keys({ ...revenueByDoctor, ...sessionsByDoctor }).forEach((doctorName) => {
+      const rule = matchPayrollRule(doctorName);
+      const revenue = revenueByDoctor[doctorName] || 0;
+      const sessionCount = sessionsByDoctor[doctorName] || 0;
+      if (!rule) {
+        // No matching compensation rule for this name — report their
+        // revenue for visibility but don't guess a payout formula.
+        rows.push({ doctorName, revenue, sessionCount, basePay: null, formula: 'No payroll rule set for this name', kind: 'unknown' });
+        return;
+      }
+      let basePay = 0;
+      let formula = '';
+      if (rule.kind === 'partner') {
+        basePay = revenue * 0.5;
+        formula = '50% of own revenue + equal share of net profit';
+      } else if (rule.kind === 'revenue_share') {
+        basePay = revenue * 0.5;
+        formula = '50% of own revenue';
+      } else if (rule.kind === 'fixed_plus_rate') {
+        basePay = rule.fixed + rule.rate * sessionCount;
+        formula = `Fixed ${rule.fixed} + ${rule.rate}/session × ${sessionCount} sessions`;
+      }
+      totalPayout += basePay;
+      const row = { doctorName: rule.label, revenue, sessionCount, basePay, formula, kind: rule.kind };
+      rows.push(row);
+      if (rule.kind === 'partner') partnerRows.push(row);
+    });
+
+    const netProfit = totalRevenue - totalExpenses - totalPayout;
+    const profitShare = partnerRows.length > 0 ? netProfit / partnerRows.length : 0;
+    partnerRows.forEach((row) => {
+      row.profitShare = profitShare;
+      row.totalPay = row.basePay + profitShare;
+    });
+    rows.forEach((row) => {
+      if (row.kind !== 'partner') row.totalPay = row.basePay;
+    });
+
+    res.json({ rows, totalRevenue, totalExpenses, totalPayout, netProfit, profitShare, partnerCount: partnerRows.length });
+  } catch (err) {
+    console.error('Payroll error:', err);
+    res.status(500).json({ error: 'Failed to compute payroll: ' + err.message });
+  }
+});
+
 app.get('/api/expenses', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
