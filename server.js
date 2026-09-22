@@ -513,7 +513,11 @@ app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
   try {
     const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
     const [apptRes, expRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}&deleted_at=is.null&status=neq.cancelled`, { headers }),
+      // Fetch everyone (including cancelled) so we can positively identify
+      // and skip cancelled ones in JS below — a cancelled appointment
+      // earns no revenue and doesn't count as a held session, for any
+      // doctor, ever.
+      fetch(`${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(start)}&start_time=lte.${encodeURIComponent(end)}&deleted_at=is.null`, { headers }),
       fetch(`${SUPABASE_URL}/rest/v1/expenses?expense_date=gte.${encodeURIComponent(start.slice(0, 10))}&expense_date=lte.${encodeURIComponent(end.slice(0, 10))}`, { headers }),
     ]);
     const appointments = await apptRes.json();
@@ -535,6 +539,7 @@ app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
       const rule = matchPayrollRule(doctorName);
       const key = rule ? rule.label : `unmatched:${doctorName.trim().toLowerCase()}`;
       if (!rule) unmatchedNames[key] = doctorName;
+      if (ev.status === 'cancelled') return; // a cancelled session earns nothing and doesn't count as held
       sessionsByKey[key] = (sessionsByKey[key] || 0) + 1;
       if (!ev.paid || ev.is_free) return;
       const notes = ev.notes || [];
