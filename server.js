@@ -619,7 +619,7 @@ app.get('/api/expenses', requireApprovedAny, async (req, res) => {
 
 app.post('/api/expenses', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { description, amount, expenseDate } = req.body || {};
+  const { description, amount, expenseDate, paymentMethod } = req.body || {};
   if (!description || !amount) return res.status(400).json({ error: 'Missing description or amount.' });
   try {
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/expenses`, {
@@ -634,6 +634,7 @@ app.post('/api/expenses', requireApprovedAny, async (req, res) => {
         description,
         amount,
         expense_date: expenseDate || new Date().toISOString().slice(0, 10),
+        payment_method: paymentMethod === 'instapay' ? 'instapay' : 'cash',
         created_by: req.doctor.name || req.doctor.email,
       }),
     });
