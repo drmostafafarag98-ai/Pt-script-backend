@@ -522,14 +522,20 @@ app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
       return res.status(500).json({ error: 'Could not read appointments or expenses for this range.' });
     }
 
-    // Revenue per doctor: sum of the numeric amount in each "Paid X EGP
-    // (Cash/InstaPay)" note on their paid, non-free appointments — the
-    // same figures the Dashboard's money cards already rely on.
-    const revenueByDoctor = {};
-    const sessionsByDoctor = {};
+    // Revenue/sessions per doctor: group by the MATCHED PAYROLL RULE first
+    // (not the raw doctor_name string) — appointments spell the same
+    // doctor's name in slightly different ways ("Dr Menna Azzam" vs
+    // "menna azzam" etc.), and grouping by raw string would double-pay a
+    // fixed-rate doctor once per spelling variant.
+    const revenueByKey = {};
+    const sessionsByKey = {};
+    const unmatchedNames = {};
     appointments.forEach((ev) => {
       const doctorName = ev.doctor_name || 'Unassigned';
-      sessionsByDoctor[doctorName] = (sessionsByDoctor[doctorName] || 0) + 1;
+      const rule = matchPayrollRule(doctorName);
+      const key = rule ? rule.label : `unmatched:${doctorName.trim().toLowerCase()}`;
+      if (!rule) unmatchedNames[key] = doctorName;
+      sessionsByKey[key] = (sessionsByKey[key] || 0) + 1;
       if (!ev.paid || ev.is_free) return;
       const notes = ev.notes || [];
       let amount = 0;
@@ -537,25 +543,25 @@ app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
         const m = (n.text || '').match(/^paid\s+([\d.,]+)\s*egp\s*\((cash|instapay)\)/i);
         if (m) amount = parseFloat(m[1].replace(/,/g, ''));
       });
-      revenueByDoctor[doctorName] = (revenueByDoctor[doctorName] || 0) + amount;
+      revenueByKey[key] = (revenueByKey[key] || 0) + amount;
     });
 
     const totalExpenses = expenses.reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
-    const totalRevenue = Object.values(revenueByDoctor).reduce((a, b) => a + b, 0);
+    const totalRevenue = Object.values(revenueByKey).reduce((a, b) => a + b, 0);
 
     const rows = [];
     let totalPayout = 0;
     const partnerRows = [];
-    Object.keys({ ...revenueByDoctor, ...sessionsByDoctor }).forEach((doctorName) => {
-      const rule = matchPayrollRule(doctorName);
-      const revenue = revenueByDoctor[doctorName] || 0;
-      const sessionCount = sessionsByDoctor[doctorName] || 0;
-      if (!rule) {
+    Object.keys({ ...revenueByKey, ...sessionsByKey }).forEach((key) => {
+      const revenue = revenueByKey[key] || 0;
+      const sessionCount = sessionsByKey[key] || 0;
+      if (key.startsWith('unmatched:')) {
         // No matching compensation rule for this name — report their
         // revenue for visibility but don't guess a payout formula.
-        rows.push({ doctorName, revenue, sessionCount, basePay: null, formula: 'No payroll rule set for this name', kind: 'unknown' });
+        rows.push({ doctorName: unmatchedNames[key], revenue, sessionCount, basePay: null, formula: 'No payroll rule set for this name', kind: 'unknown' });
         return;
       }
+      const rule = PAYROLL_RULES.find((r) => r.label === key);
       let basePay = 0;
       let formula = '';
       if (rule.kind === 'partner') {
@@ -1662,9 +1668,9 @@ app.patch('/api/sessions/rename-patient', requireApprovedDoctor, async (req, res
       console.error('Session rename-patient: could not list sessions', allRes.status, allSessions);
       return res.status(500).json({ error: 'Could not read sessions to merge.' });
     }
-    const target = fromName.trim();
+    const target = fromName.trim().toLowerCase();
     const matchingIds = (allSessions || [])
-      .filter(s => (s.patient_name || '').trim() === target)
+      .filter(s => (s.patient_name || '').trim().toLowerCase() === target)
       .map(s => s.id);
     if (matchingIds.length === 0) {
       return res.status(404).json({ error: `No sessions found under "${fromName}" (nothing to merge).` });
@@ -1710,9 +1716,9 @@ app.patch('/api/sessions/rename-doctor', requireOwnerDoctor, async (req, res) =>
       console.error('Session rename-doctor: could not list sessions', allRes.status, allSessions);
       return res.status(500).json({ error: 'Could not read sessions to merge.' });
     }
-    const target = fromName.trim();
+    const target = fromName.trim().toLowerCase();
     const matchingIds = (allSessions || [])
-      .filter(s => (s.doctor_name || '').trim() === target)
+      .filter(s => (s.doctor_name || '').trim().toLowerCase() === target)
       .map(s => s.id);
     if (matchingIds.length === 0) {
       return res.status(404).json({ error: `No sessions found under "${fromName}" (nothing to merge).` });
