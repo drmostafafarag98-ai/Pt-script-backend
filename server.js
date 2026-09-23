@@ -667,6 +667,94 @@ app.delete('/api/transfers/:id', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- Other income ----
+// Revenue that doesn't come from a patient session — clinic-run events,
+// workshops, etc. Tracked the same way as Expenses (description, amount,
+// date, payment method) but ADDS to the money totals instead of
+// subtracting.
+app.get('/api/other-income', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  try {
+    let url = `${SUPABASE_URL}/rest/v1/other_income?order=income_date.desc`;
+    if (start && end) url += `&income_date=gte.${encodeURIComponent(start)}&income_date=lte.${encodeURIComponent(end)}`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Other-income GET error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.post('/api/other-income', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { description, amount, incomeDate, paymentMethod } = req.body || {};
+  if (!description || !amount) return res.status(400).json({ error: 'Missing description or amount.' });
+  try {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/other_income`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        description,
+        amount,
+        income_date: incomeDate || new Date().toISOString().slice(0, 10),
+        payment_method: paymentMethod === 'instapay' ? 'instapay' : 'cash',
+        created_by: req.doctor.name || req.doctor.email,
+      }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) throw new Error(JSON.stringify(inserted));
+    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+  } catch (err) {
+    console.error('Other-income POST error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.patch('/api/other-income/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { paymentMethod } = req.body || {};
+  if (paymentMethod !== 'cash' && paymentMethod !== 'instapay') return res.status(400).json({ error: 'paymentMethod must be cash or instapay.' });
+  try {
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/other_income?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ payment_method: paymentMethod }),
+    });
+    const data = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(data));
+    res.json(Array.isArray(data) ? data[0] : data);
+  } catch (err) {
+    console.error('Other-income PATCH error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.delete('/api/other-income/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/other_income?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Other-income DELETE error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 app.get('/api/expenses', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
