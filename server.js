@@ -602,6 +602,71 @@ app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
   }
 });
 
+// ---- Internal Cash↔InstaPay transfers ----
+// Moving money between the clinic's cash drawer and its InstaPay account
+// isn't new revenue and isn't a real expense — it just needs to be
+// tracked so Net Cash / Net InstaPay stay accurate.
+app.get('/api/transfers', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  try {
+    let url = `${SUPABASE_URL}/rest/v1/transfers?order=transfer_date.desc`;
+    if (start && end) url += `&transfer_date=gte.${encodeURIComponent(start)}&transfer_date=lte.${encodeURIComponent(end)}`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Transfers GET error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.post('/api/transfers', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { amount, fromMethod, toMethod, transferDate, note } = req.body || {};
+  if (!amount || !fromMethod || !toMethod) return res.status(400).json({ error: 'Missing amount, fromMethod, or toMethod.' });
+  if (fromMethod === toMethod) return res.status(400).json({ error: 'fromMethod and toMethod must differ.' });
+  try {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/transfers`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        amount,
+        from_method: fromMethod,
+        to_method: toMethod,
+        transfer_date: transferDate || new Date().toISOString().slice(0, 10),
+        note: note || null,
+        created_by: req.doctor.name || req.doctor.email,
+      }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) throw new Error(JSON.stringify(inserted));
+    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+  } catch (err) {
+    console.error('Transfers POST error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.delete('/api/transfers/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/transfers?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Transfers DELETE error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 app.get('/api/expenses', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
