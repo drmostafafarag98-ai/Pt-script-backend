@@ -755,6 +755,71 @@ app.delete('/api/other-income/:id', requireApprovedAny, async (req, res) => {
   }
 });
 
+// ---- Doctor withdrawals ----
+// Money a doctor/partner takes out of the cash or InstaPay pool as their
+// own earnings — tracked separately from general business Expenses so
+// "Expenses" stays about clinic operating costs (rent, ads, supplies)
+// and this stays about who's already been paid how much of their share.
+app.get('/api/doctor-withdrawals', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { start, end } = req.query;
+  try {
+    let url = `${SUPABASE_URL}/rest/v1/doctor_withdrawals?order=withdrawal_date.desc`;
+    if (start && end) url += `&withdrawal_date=gte.${encodeURIComponent(start)}&withdrawal_date=lte.${encodeURIComponent(end)}`;
+    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await upstream.text();
+    res.status(upstream.status).type('application/json').send(data);
+  } catch (err) {
+    console.error('Doctor-withdrawals GET error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.post('/api/doctor-withdrawals', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { doctorName, amount, paymentMethod, withdrawalDate, note } = req.body || {};
+  if (!doctorName || !amount) return res.status(400).json({ error: 'Missing doctorName or amount.' });
+  try {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/doctor_withdrawals`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        doctor_name: doctorName,
+        amount,
+        payment_method: paymentMethod === 'instapay' ? 'instapay' : 'cash',
+        withdrawal_date: withdrawalDate || new Date().toISOString().slice(0, 10),
+        note: note || null,
+        created_by: req.doctor.name || req.doctor.email,
+      }),
+    });
+    const inserted = await insertRes.json();
+    if (!insertRes.ok) throw new Error(JSON.stringify(inserted));
+    res.json(Array.isArray(inserted) ? inserted[0] : inserted);
+  } catch (err) {
+    console.error('Doctor-withdrawals POST error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+app.delete('/api/doctor-withdrawals/:id', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/doctor_withdrawals?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'DELETE',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Doctor-withdrawals DELETE error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 app.get('/api/expenses', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
