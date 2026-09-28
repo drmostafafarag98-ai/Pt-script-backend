@@ -1623,11 +1623,23 @@ app.post('/api/whatsapp/webhook', (req, res) => {
 });
 
 // ---- WhatsApp Cloud API: reusable sender ----
-function normalizeEgyptPhone(raw) {
-  let digits = String(raw || '').replace(/[^\d]/g, '');
-  if (digits.startsWith('0')) digits = digits.slice(1);
-  if (!digits.startsWith('20')) digits = '20' + digits;
-  return digits;
+function normalizeEgyptPhone(raw){
+  const trimmed = String(raw || '').trim();
+  const digits = trimmed.replace(/[^\d]/g, '');
+  if(!digits) return digits;
+  // Explicit international format ("+44…" or "0044…") — keep the country code as typed.
+  if(trimmed.startsWith('+')) return digits;
+  if(digits.startsWith('00')) return digits.slice(2);
+  // Egyptian local format (01xxxxxxxxx, or a landline like 02xxxxxxxx).
+  if(digits.startsWith('0')) return '20' + digits.slice(1);
+  // Already Egyptian international (20 + 10 digits).
+  if(digits.startsWith('20') && digits.length === 12) return digits;
+  // Egyptian mobile typed without the leading 0 (1[0125] + 8 digits).
+  if(/^1[0125]\d{8}$/.test(digits)) return '20' + digits;
+  // Long enough to already carry a country code (e.g. 447762863623 typed without "+") — leave it alone.
+  if(digits.length >= 11) return digits;
+  // Short leftover: assume Egyptian.
+  return '20' + digits;
 }
 
 // Meta requires an APPROVED template (not free-form text) for any message
