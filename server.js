@@ -1270,6 +1270,53 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
   }
 });
 
+// ---- GET /api/packages/active ---- (every unfinished package, with the patient's phone, for the policy-sent check)
+app.get('/api/packages/active', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const pkgRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?order=created_at.asc`, { headers });
+    const rows = await pkgRes.json();
+    if (!pkgRes.ok) throw new Error(JSON.stringify(rows));
+    const active = (Array.isArray(rows) ? rows : []).filter(p => p.used_sessions < p.total_sessions);
+    const phoneRes = await fetch(`${SUPABASE_URL}/rest/v1/appointments?select=patient_name,patient_phone&patient_phone=not.is.null&deleted_at=is.null&order=start_time.desc&limit=3000`, { headers });
+    const phoneRows = phoneRes.ok ? await phoneRes.json() : [];
+    const phoneByName = new Map();
+    (Array.isArray(phoneRows) ? phoneRows : []).forEach(r => {
+      const k = (r.patient_name || '').trim().toLowerCase();
+      if (k && r.patient_phone && !phoneByName.has(k)) phoneByName.set(k, r.patient_phone);
+    });
+    res.json(active.map(p => ({ ...p, patient_phone: phoneByName.get((p.patient_name || '').trim().toLowerCase()) || null })));
+  } catch (err) {
+    console.error('Active packages list error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ---- POST /api/packages/:id/policy-sent ---- (mark the package policy as sent, or pass sent:false to clear it)
+app.post('/api/packages/:id/policy-sent', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const sent = !(req.body && req.body.sent === false);
+  try {
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ policy_sent_at: sent ? new Date().toISOString() : null }),
+    });
+    const updated = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(updated));
+    res.json(Array.isArray(updated) ? updated[0] : updated);
+  } catch (err) {
+    console.error('Package policy-sent error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 // ---- POST /api/packages/:id/add-payment ---- (record another installment toward this package's total_price)
 app.post('/api/packages/:id/add-payment', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
