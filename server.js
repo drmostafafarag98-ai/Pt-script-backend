@@ -1196,7 +1196,7 @@ app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
     return res.status(403).json({ error: 'You don\'t have permission to record payments — ask the clinic owner to grant it.' });
   }
-  const { patientName, totalSessions, startingUsed } = req.body || {};
+  const { patientName, totalSessions, startingUsed, totalPrice, amountPaid } = req.body || {};
   if (!patientName || !totalSessions || totalSessions < 1) return res.status(400).json({ error: 'Missing patientName or totalSessions.' });
   const used = Math.max(0, Math.min(totalSessions, parseInt(startingUsed, 10) || 0));
   if (used > 0 && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'register_packages')) {
@@ -1215,6 +1215,8 @@ app.post('/api/packages', requireApprovedAny, async (req, res) => {
         patient_name: patientName,
         total_sessions: totalSessions,
         used_sessions: used,
+        total_price: (totalPrice === undefined || totalPrice === null || totalPrice === '') ? null : Number(totalPrice),
+        amount_paid: Number(amountPaid) || 0,
         created_by: req.doctor.email,
       }),
     });
@@ -1253,7 +1255,11 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
   const { patientName } = req.query;
   if (!patientName) return res.status(400).json({ error: 'Missing patientName.' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/packages?patient_name=eq.${encodeURIComponent(patientName)}&order=created_at.desc`;
+    // Oldest-first (FIFO): if a patient buys a new package while an older
+    // one still has sessions left, the older package must keep being the
+    // one sessions get consumed from until it's finished — otherwise its
+    // leftover sessions would get stranded forever behind the new one.
+    const url = `${SUPABASE_URL}/rest/v1/packages?patient_name=eq.${encodeURIComponent(patientName)}&order=created_at.asc`;
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const rows = await upstream.json();
     const active = (Array.isArray(rows) ? rows : []).find(p => p.used_sessions < p.total_sessions);
@@ -1261,6 +1267,38 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
   } catch (err) {
     console.error('Active package lookup error:', err);
     res.status(500).json({ error: 'Failed to look up package: ' + err.message });
+  }
+});
+
+// ---- POST /api/packages/:id/add-payment ---- (record another installment toward this package's total_price)
+app.post('/api/packages/:id/add-payment', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const { amount } = req.body || {};
+  const add = Number(amount);
+  if (!add || add <= 0) return res.status(400).json({ error: 'Missing or invalid amount.' });
+  try {
+    const getUrl = `${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`;
+    const getRes = await fetch(getUrl, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const rows = await getRes.json();
+    const pkg = Array.isArray(rows) && rows[0];
+    if (!pkg) return res.status(404).json({ error: 'Package not found.' });
+    const newPaid = Number(pkg.amount_paid || 0) + add;
+    const patchRes = await fetch(getUrl, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ amount_paid: newPaid }),
+    });
+    const updated = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(updated));
+    res.json(Array.isArray(updated) ? updated[0] : updated);
+  } catch (err) {
+    console.error('Package add-payment error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
   }
 });
 
