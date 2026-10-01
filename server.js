@@ -1270,6 +1270,33 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
   }
 });
 
+// ---- GET /api/packages/owed ---- (every package with money still owed — finished or not — with the patient's phone)
+app.get('/api/packages/owed', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const pkgRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?total_price=not.is.null&order=created_at.asc`, { headers });
+    const rows = await pkgRes.json();
+    if (!pkgRes.ok) throw new Error(JSON.stringify(rows));
+    // PostgREST can't compare two columns, so the "still owed" test happens here.
+    const owed = (Array.isArray(rows) ? rows : [])
+      .map(p => ({ ...p, owed: Number(p.total_price) - Number(p.amount_paid || 0) }))
+      .filter(p => p.owed > 0.5);
+    const phoneRes = await fetch(`${SUPABASE_URL}/rest/v1/appointments?select=patient_name,patient_phone&patient_phone=not.is.null&deleted_at=is.null&order=start_time.desc&limit=3000`, { headers });
+    const phoneRows = phoneRes.ok ? await phoneRes.json() : [];
+    const phoneByName = new Map();
+    (Array.isArray(phoneRows) ? phoneRows : []).forEach(r => {
+      const k = (r.patient_name || '').trim().toLowerCase();
+      if (k && r.patient_phone && !phoneByName.has(k)) phoneByName.set(k, r.patient_phone);
+    });
+    owed.sort((a, b) => b.owed - a.owed);
+    res.json(owed.map(p => ({ ...p, patient_phone: phoneByName.get((p.patient_name || '').trim().toLowerCase()) || null })));
+  } catch (err) {
+    console.error('Owed packages list error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 // ---- GET /api/packages/active ---- (every unfinished package, with the patient's phone, for the policy-sent check)
 app.get('/api/packages/active', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
