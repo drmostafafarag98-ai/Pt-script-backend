@@ -1344,6 +1344,32 @@ app.post('/api/packages/:id/policy-sent', requireApprovedAny, async (req, res) =
   }
 });
 
+// ---- POST /api/packages/:id/set-paid ---- (correct how much of the package price counts as paid, WITHOUT recording any money — for payments already recorded on an appointment)
+app.post('/api/packages/:id/set-paid', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const value = Number(req.body && req.body.amountPaid);
+  if (!isFinite(value) || value < 0) return res.status(400).json({ error: 'Missing or invalid amountPaid.' });
+  try {
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ amount_paid: value }),
+    });
+    const updated = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(updated));
+    if (!Array.isArray(updated) || updated.length === 0) return res.status(404).json({ error: 'Package not found.' });
+    res.json(updated[0]);
+  } catch (err) {
+    console.error('Package set-paid error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
 // ---- POST /api/packages/:id/add-payment ---- (record another installment toward this package's total_price)
 app.post('/api/packages/:id/add-payment', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
