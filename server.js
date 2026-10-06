@@ -1259,7 +1259,10 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
     // one still has sessions left, the older package must keep being the
     // one sessions get consumed from until it's finished — otherwise its
     // leftover sessions would get stranded forever behind the new one.
-    const url = `${SUPABASE_URL}/rest/v1/packages?patient_name=eq.${encodeURIComponent(patientName)}&order=created_at.asc`;
+    // ilike WITHOUT wildcards = whole-name match that ignores upper/lower case
+    // ("Adham Tantawy" and "adham tantawy" are the same patient).
+    const safeName = String(patientName).trim().replace(/\*/g, '').replace(/[\\%_]/g, c => '\\' + c);
+    const url = `${SUPABASE_URL}/rest/v1/packages?patient_name=ilike.${encodeURIComponent(safeName)}&order=created_at.asc`;
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const rows = await upstream.json();
     const active = (Array.isArray(rows) ? rows : []).find(p => p.used_sessions < p.total_sessions);
@@ -1340,6 +1343,35 @@ app.post('/api/packages/:id/policy-sent', requireApprovedAny, async (req, res) =
     res.json(Array.isArray(updated) ? updated[0] : updated);
   } catch (err) {
     console.error('Package policy-sent error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ---- POST /api/packages/:id/set-used ---- (correct how many sessions the package has used — e.g. free sessions or a visit that belonged to the previous package were counted by mistake)
+app.post('/api/packages/:id/set-used', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'register_packages')) {
+    return res.status(403).json({ error: 'You don\'t have permission to change a package\'s session count — ask the clinic owner to grant it.' });
+  }
+  const value = parseInt(req.body && req.body.usedSessions, 10);
+  if (!Number.isInteger(value) || value < 0) return res.status(400).json({ error: 'Missing or invalid usedSessions.' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const getRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`, { headers });
+    const rows = await getRes.json();
+    const pkg = Array.isArray(rows) && rows[0];
+    if (!pkg) return res.status(404).json({ error: 'Package not found.' });
+    if (value > pkg.total_sessions) return res.status(400).json({ error: `This package only has ${pkg.total_sessions} sessions.` });
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH',
+      headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify({ used_sessions: value }),
+    });
+    const updated = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(updated));
+    res.json(Array.isArray(updated) ? updated[0] : updated);
+  } catch (err) {
+    console.error('Package set-used error:', err);
     res.status(500).json({ error: 'Failed: ' + err.message });
   }
 });
@@ -1682,6 +1714,14 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
     });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
+
+    if (upstream.ok && arrived === true) {
+      try {
+        const rows = JSON.parse(data);
+        const updatedAppt = Array.isArray(rows) ? rows[0] : rows;
+        notifyDoctorArrivalTelegram(updatedAppt).catch(e => console.error('Telegram arrival alert failed:', e.message));
+      } catch (e) { /* the alert is optional */ }
+    }
 
     if (upstream.ok && (doctorName !== undefined || patientName !== undefined)) {
       try {
@@ -2867,6 +2907,149 @@ app.get('/api/doctors/colors', requireApprovedAny, async (req, res) => {
 // the owner can, say, give a trusted secretary access without making
 // them an owner, or keep it from a doctor who shouldn't see clinic-wide
 // financials.
+// ---- Telegram arrival alerts ----
+// When the secretary marks a patient as arrived, the assigned doctor gets a
+// Telegram message automatically (works with the phone locked and the app
+// closed). Uses plain HTTPS calls to the Telegram Bot API — no extra
+// package, so nothing new can break the server at startup.
+//
+// One-time setup: create a bot with @BotFather, set TELEGRAM_BOT_TOKEN on
+// the server, then press "Connect Telegram bot" in Manage Doctors (owner).
+// Each doctor then opens their own link once and taps Start.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://pt-script-backend.onrender.com').replace(/\/+$/, '');
+let telegramBotUsername = '';
+
+function telegramWebhookSecret() {
+  return crypto.createHash('sha256').update('tg-webhook:' + TELEGRAM_BOT_TOKEN).digest('hex').slice(0, 32);
+}
+// A doctor's personal link code is derived from their email — nothing to store.
+function telegramLinkCode(email) {
+  return crypto.createHmac('sha256', TELEGRAM_BOT_TOKEN).update(String(email).trim().toLowerCase()).digest('hex').slice(0, 12);
+}
+
+async function telegramApi(method, body) {
+  const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) throw new Error(j.description || `Telegram error ${r.status}`);
+  return j.result;
+}
+function telegramSend(chatId, text) { return telegramApi('sendMessage', { chat_id: chatId, text }); }
+async function getTelegramBotUsername() {
+  if (telegramBotUsername) return telegramBotUsername;
+  const me = await telegramApi('getMe');
+  telegramBotUsername = me.username || '';
+  return telegramBotUsername;
+}
+
+const ARRIVAL_AR_NAMES = { youssef: 'يوسف', yousef: 'يوسف', marwa: 'مروة', mostafa: 'مصطفى', mustafa: 'مصطفى', omnia: 'أمنية', omnya: 'أمنية', menna: 'منة', zeinab: 'زينب' };
+const ARRIVAL_FEMALE = new Set(['marwa','omnia','omnya','menna','zeinab','vara','nada','mona','sara','salma','nour','hana','doaa','dina','rana','yara','mariam','maryam','eman','asmaa','esraa','aya','heba','nermin','noha','rania','shaimaa','shahd','rawan']);
+const ARRIVAL_MALE = new Set(['mostafa','mustafa','youssef','yousef','joseph','ahmed','mohamed','mahmoud','omar','ali','ibrahim','hassan','khaled','karim','amr','tarek','sherif','hesham','osama']);
+
+function buildArrivalMessage(appt, doctorName) {
+  const rawName = String(doctorName || appt.doctor_name || '').trim();
+  const tokens = rawName.split(/\s+/).filter(t => !/^(dr\.?|doctor|د\.?|دكتور|دكتورة)$/i.test(t));
+  const first = (tokens[0] || rawName).trim();
+  const key = first.toLowerCase();
+  const title = ARRIVAL_FEMALE.has(key) ? 'دكتورة' : (ARRIVAL_MALE.has(key) ? 'دكتور' : 'د.');
+  const nameAr = ARRIVAL_AR_NAMES[key] || first;
+  const fmt = iso => new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' });
+  const typeAr = appt.visit_type === 'checkup' ? 'كشف' : (appt.visit_type === 'recovery' ? 'ريكفري' : 'جلسة');
+  return `${title} ${nameAr} 👋\nالعيان ${appt.patient_name || ''} وصل العيادة دلوقتي (${fmt(appt.arrived_at)}) ✅\nالموعد: ${appt.start_time ? fmt(appt.start_time) : ''} · ${typeAr}`;
+}
+
+async function notifyDoctorArrivalTelegram(appt) {
+  if (!TELEGRAM_BOT_TOKEN || !appt || !appt.arrived_at) return;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/doctors?status=eq.approved&telegram_chat_id=not.is.null`, {
+    headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+  });
+  const docs = await r.json();
+  if (!Array.isArray(docs) || docs.length === 0) return;
+  const nm = String(appt.doctor_name || '').trim().toLowerCase();
+  const byName = docs.find(d => String(d.name || '').trim().toLowerCase() === nm);
+  const byColor = appt.doctor_color ? docs.filter(d => d.color === appt.doctor_color) : [];
+  const doc = byName || (byColor.length === 1 ? byColor[0] : null);
+  if (!doc) return;
+  await telegramSend(doc.telegram_chat_id, buildArrivalMessage(appt, doc.name));
+}
+
+app.post('/api/telegram/setup', requireOwnerDoctor, async (req, res) => {
+  if (!TELEGRAM_BOT_TOKEN) return res.status(400).json({ error: 'TELEGRAM_BOT_TOKEN is not set on the server yet.' });
+  try {
+    const username = await getTelegramBotUsername();
+    await telegramApi('setWebhook', { url: `${PUBLIC_BASE_URL}/api/telegram/webhook/${telegramWebhookSecret()}`, allowed_updates: ['message'] });
+    res.json({ ok: true, botUsername: username });
+  } catch (err) {
+    console.error('Telegram setup error:', err);
+    res.status(500).json({ error: 'Telegram setup failed: ' + err.message });
+  }
+});
+
+app.get('/api/telegram/link/:email', requireOwnerOrPermission('manage_team'), async (req, res) => {
+  if (!TELEGRAM_BOT_TOKEN) return res.status(400).json({ error: 'TELEGRAM_BOT_TOKEN is not set on the server yet.' });
+  try {
+    const username = await getTelegramBotUsername();
+    res.json({ botUsername: username, url: `https://t.me/${username}?start=${telegramLinkCode(req.params.email)}` });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not reach Telegram: ' + err.message });
+  }
+});
+
+app.post('/api/telegram/test/:email', requireOwnerOrPermission('manage_team'), async (req, res) => {
+  if (!TELEGRAM_BOT_TOKEN) return res.status(400).json({ error: 'TELEGRAM_BOT_TOKEN is not set on the server yet.' });
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}&select=name,telegram_chat_id`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await r.json();
+    const doc = Array.isArray(rows) && rows[0];
+    if (!doc || !doc.telegram_chat_id) return res.status(400).json({ error: 'This doctor has not linked Telegram yet.' });
+    await telegramSend(doc.telegram_chat_id, '✅ رسالة تجربة من عيادة Empower — تنبيهات وصول العيانين شغّالة.');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not send the test message: ' + err.message });
+  }
+});
+
+// Telegram calls this when someone messages the bot. The secret in the path
+// is derived from the bot token, so only Telegram (which we gave the URL to)
+// can reach it.
+app.post('/api/telegram/webhook/:secret', async (req, res) => {
+  if (!TELEGRAM_BOT_TOKEN || req.params.secret !== telegramWebhookSecret()) return res.sendStatus(404);
+  res.sendStatus(200);
+  try {
+    const msg = req.body && req.body.message;
+    if (!msg || !msg.chat || msg.chat.type !== 'private' || typeof msg.text !== 'string') return;
+    const m = msg.text.trim().match(/^\/start(?:@\w+)?(?:\s+(\S+))?$/);
+    if (!m) return;
+    const code = m[1];
+    if (!code) {
+      await telegramSend(msg.chat.id, 'أهلاً 👋 اطلب من العيادة لينك الربط الخاص بيك، وادوس عليه عشان توصلك تنبيهات وصول العيانين.');
+      return;
+    }
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/doctors?status=eq.approved&select=email,name`, { headers });
+    const docs = await r.json();
+    const doc = (Array.isArray(docs) ? docs : []).find(d => telegramLinkCode(d.email) === code);
+    if (!doc) {
+      await telegramSend(msg.chat.id, 'اللينك ده مش صح أو قديم ❌ اطلب من العيادة لينك جديد.');
+      return;
+    }
+    await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(doc.email)}`, {
+      method: 'PATCH',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ telegram_chat_id: msg.chat.id }),
+    });
+    await telegramSend(msg.chat.id, `تم الربط ✅ يا ${doc.name || 'دكتور'}\nهتوصلك هنا رسالة أول ما عيان من عيانينك يوصل العيادة.`);
+  } catch (err) {
+    console.error('Telegram webhook error:', err.message);
+  }
+});
+
 // ---- POST /api/doctors/:email/phone ----
 // Saves a team member's WhatsApp number (used for the "patient arrived" message).
 app.post('/api/doctors/:email/phone', requireOwnerOrPermission('manage_team'), async (req, res) => {
