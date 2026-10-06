@@ -1633,7 +1633,7 @@ app.post('/api/appointments', requireApprovedAny, async (req, res) => {
 // calendar too.
 app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status, paid, visitType, isFree } = req.body || {};
+  const { patientName, patientPhone, startTime, endTime, doctorColor, doctorName, status, paid, visitType, isFree, arrived } = req.body || {};
   const ownName = req.doctor.name || req.doctor.email;
 
   // Cancelling / restoring / no-show requires edit_cancel_appointments
@@ -1665,6 +1665,8 @@ app.patch('/api/appointments/:id', requireApprovedAny, async (req, res) => {
   if (paid !== undefined) patch.paid = paid;
   if (visitType !== undefined) patch.visit_type = visitType;
   if (isFree !== undefined){ patch.is_free = isFree; if(isFree) patch.paid = true; }
+  // Check-in: anyone signed in can mark a patient as arrived (or undo it) — no extra permission, the secretary does this all day.
+  if (arrived !== undefined) patch.arrived_at = arrived ? new Date().toISOString() : null;
   if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to update.' });
   try {
     const url = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(req.params.id)}`;
@@ -2865,6 +2867,33 @@ app.get('/api/doctors/colors', requireApprovedAny, async (req, res) => {
 // the owner can, say, give a trusted secretary access without making
 // them an owner, or keep it from a doctor who shouldn't see clinic-wide
 // financials.
+// ---- POST /api/doctors/:email/phone ----
+// Saves a team member's WhatsApp number (used for the "patient arrived" message).
+app.post('/api/doctors/:email/phone', requireOwnerOrPermission('manage_team'), async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const raw = String((req.body && req.body.phone) || '').trim();
+  if (raw && !/^[+\d][\d\s\-()]{6,20}$/.test(raw)) return res.status(400).json({ error: 'That does not look like a phone number.' });
+  try {
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(req.params.email)}`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({ phone: raw || null }),
+    });
+    const updated = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(updated));
+    if (!Array.isArray(updated) || updated.length === 0) return res.status(404).json({ error: 'Doctor not found.' });
+    res.json({ ok: true, phone: updated[0].phone });
+  } catch (err) {
+    console.error('Set-phone error:', err);
+    res.status(500).json({ error: 'Failed to save the number: ' + err.message });
+  }
+});
+
 // ---- POST /api/doctors/:email/permissions ----
 // Owner sets the granular permissions object for a team member. Body is
 // the full set of booleans, e.g. { view_payments: true, send_whatsapp:
