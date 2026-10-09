@@ -1191,18 +1191,58 @@ app.post('/api/timetree/import', requireApprovedAny, async (req, res) => {
   res.json({ imported, errors, phoneFilled });
 });
 
+// ---- Package duplicate protection helpers ----
+// Compare patient names loosely: ignore case, and the "el"/"al" prefix
+// ("tantawy" and "eltantawy" are the same family name). Same rule as the app screen.
+const pkgCreateLocks = new Set();
+function normalizePkgName(s) {
+  return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ').split(' ')
+    .map(w => w.replace(/^(el|al)(?=[a-z]{3,})/, '')).join(' ');
+}
+function samePatientLoosely(a, b) {
+  const x = normalizePkgName(a), y = normalizePkgName(b);
+  if (!x || !y) return false;
+  return x === y || (x.length >= 3 && y.length >= 3 && (x.includes(y) || y.includes(x)));
+}
+
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
     return res.status(403).json({ error: 'You don\'t have permission to record payments — ask the clinic owner to grant it.' });
   }
-  const { patientName, totalSessions, startingUsed, totalPrice, amountPaid } = req.body || {};
+  const { patientName, totalSessions, startingUsed, totalPrice, amountPaid, confirmDuplicate } = req.body || {};
   if (!patientName || !totalSessions || totalSessions < 1) return res.status(400).json({ error: 'Missing patientName or totalSessions.' });
   const used = Math.max(0, Math.min(totalSessions, parseInt(startingUsed, 10) || 0));
   if (used > 0 && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'register_packages')) {
     return res.status(403).json({ error: 'You don\'t have permission to backfill an existing package — ask the clinic owner to grant it.' });
   }
+  // Only one package creation per patient at a time (stops double taps).
+  const lockKey = normalizePkgName(patientName);
+  if (pkgCreateLocks.has(lockKey)) {
+    return res.status(409).json({ code: 'PACKAGE_JUST_CREATED', error: 'A package for this patient is being created right now — wait a moment and check the Payment tab before trying again.' });
+  }
+  pkgCreateLocks.add(lockKey);
   try {
+    // ---- Duplicate protection ----
+    let existingPkgs = [];
+    try {
+      const listRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?select=id,patient_name,total_sessions,used_sessions,created_at&order=created_at.asc`, {
+        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+      });
+      if (listRes.ok) existingPkgs = await listRes.json();
+    } catch (e) { console.error('Duplicate check failed (continuing):', e.message); }
+    if (!Array.isArray(existingPkgs)) existingPkgs = [];
+    // 1) Same patient, package created less than 3 minutes ago = double tap. No override.
+    const justCreated = existingPkgs.find(p => normalizePkgName(p.patient_name) === lockKey && (Date.now() - new Date(p.created_at).getTime()) < 3 * 60 * 1000);
+    if (justCreated) {
+      return res.status(409).json({ code: 'PACKAGE_JUST_CREATED', error: `A package for "${justCreated.patient_name}" was created a moment ago, so a second one was NOT created (probably a double tap). Check the Payment tab.` });
+    }
+    // 2) Patient (or a similar name) already has a running package. Needs confirmDuplicate.
+    const activeSimilar = existingPkgs.filter(p => p.used_sessions < p.total_sessions && samePatientLoosely(p.patient_name, patientName));
+    if (activeSimilar.length > 0 && !confirmDuplicate) {
+      const lines = activeSimilar.map(p => `${p.patient_name}: ${p.used_sessions} of ${p.total_sessions} used`).join(' | ');
+      return res.status(409).json({ code: 'ACTIVE_PACKAGE_EXISTS', existing: activeSimilar, error: `This patient already has an active package (${lines}). A new one was NOT created. If the count is wrong, use "Fix session count" in the Payment tab.` });
+    }
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/packages`, {
       method: 'POST',
       headers: {
@@ -1226,6 +1266,8 @@ app.post('/api/packages', requireApprovedAny, async (req, res) => {
   } catch (err) {
     console.error('Create package error:', err);
     res.status(500).json({ error: 'Failed to create package: ' + err.message });
+  } finally {
+    pkgCreateLocks.delete(lockKey);
   }
 });
 
@@ -1266,7 +1308,19 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const rows = await upstream.json();
     const active = (Array.isArray(rows) ? rows : []).find(p => p.used_sessions < p.total_sessions);
-    res.json(active || null);
+    if (active) return res.json(active);
+    // Optional: no exact-name package, but ONE similar-name active package exists
+    // ("Nabila" / "Nabila barakat"). Flagged so the app can ask "same patient?".
+    if (req.query.allowSimilar === '1') {
+      const allRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?order=created_at.asc`, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+      const all = await allRes.json();
+      const similarActive = (Array.isArray(all) ? all : []).filter(p => p.used_sessions < p.total_sessions && samePatientLoosely(p.patient_name, patientName));
+      const distinctNames = new Set(similarActive.map(p => normalizePkgName(p.patient_name)));
+      if (similarActive.length > 0 && distinctNames.size === 1) {
+        return res.json({ ...similarActive[0], matched_by_similar_name: true });
+      }
+    }
+    res.json(null);
   } catch (err) {
     console.error('Active package lookup error:', err);
     res.status(500).json({ error: 'Failed to look up package: ' + err.message });
