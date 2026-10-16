@@ -1191,58 +1191,18 @@ app.post('/api/timetree/import', requireApprovedAny, async (req, res) => {
   res.json({ imported, errors, phoneFilled });
 });
 
-// ---- Package duplicate protection helpers ----
-// Compare patient names loosely: ignore case, and the "el"/"al" prefix
-// ("tantawy" and "eltantawy" are the same family name). Same rule as the app screen.
-const pkgCreateLocks = new Set();
-function normalizePkgName(s) {
-  return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ').split(' ')
-    .map(w => w.replace(/^(el|al)(?=[a-z]{3,})/, '')).join(' ');
-}
-function samePatientLoosely(a, b) {
-  const x = normalizePkgName(a), y = normalizePkgName(b);
-  if (!x || !y) return false;
-  return x === y || (x.length >= 3 && y.length >= 3 && (x.includes(y) || y.includes(x)));
-}
-
 app.post('/api/packages', requireApprovedAny, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   if (req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'view_payments')) {
     return res.status(403).json({ error: 'You don\'t have permission to record payments — ask the clinic owner to grant it.' });
   }
-  const { patientName, totalSessions, startingUsed, totalPrice, amountPaid, confirmDuplicate } = req.body || {};
+  const { patientName, totalSessions, startingUsed, totalPrice, amountPaid } = req.body || {};
   if (!patientName || !totalSessions || totalSessions < 1) return res.status(400).json({ error: 'Missing patientName or totalSessions.' });
   const used = Math.max(0, Math.min(totalSessions, parseInt(startingUsed, 10) || 0));
   if (used > 0 && req.doctor.role === 'doctor' && !hasPermission(req.doctor, 'register_packages')) {
     return res.status(403).json({ error: 'You don\'t have permission to backfill an existing package — ask the clinic owner to grant it.' });
   }
-  // Only one package creation per patient at a time (stops double taps).
-  const lockKey = normalizePkgName(patientName);
-  if (pkgCreateLocks.has(lockKey)) {
-    return res.status(409).json({ code: 'PACKAGE_JUST_CREATED', error: 'A package for this patient is being created right now — wait a moment and check the Payment tab before trying again.' });
-  }
-  pkgCreateLocks.add(lockKey);
   try {
-    // ---- Duplicate protection ----
-    let existingPkgs = [];
-    try {
-      const listRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?select=id,patient_name,total_sessions,used_sessions,created_at&order=created_at.asc`, {
-        headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
-      });
-      if (listRes.ok) existingPkgs = await listRes.json();
-    } catch (e) { console.error('Duplicate check failed (continuing):', e.message); }
-    if (!Array.isArray(existingPkgs)) existingPkgs = [];
-    // 1) Same patient, package created less than 3 minutes ago = double tap. No override.
-    const justCreated = existingPkgs.find(p => normalizePkgName(p.patient_name) === lockKey && (Date.now() - new Date(p.created_at).getTime()) < 3 * 60 * 1000);
-    if (justCreated) {
-      return res.status(409).json({ code: 'PACKAGE_JUST_CREATED', error: `A package for "${justCreated.patient_name}" was created a moment ago, so a second one was NOT created (probably a double tap). Check the Payment tab.` });
-    }
-    // 2) Patient (or a similar name) already has a running package. Needs confirmDuplicate.
-    const activeSimilar = existingPkgs.filter(p => p.used_sessions < p.total_sessions && samePatientLoosely(p.patient_name, patientName));
-    if (activeSimilar.length > 0 && !confirmDuplicate) {
-      const lines = activeSimilar.map(p => `${p.patient_name}: ${p.used_sessions} of ${p.total_sessions} used`).join(' | ');
-      return res.status(409).json({ code: 'ACTIVE_PACKAGE_EXISTS', existing: activeSimilar, error: `This patient already has an active package (${lines}). A new one was NOT created. If the count is wrong, use "Fix session count" in the Payment tab.` });
-    }
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/packages`, {
       method: 'POST',
       headers: {
@@ -1266,8 +1226,6 @@ app.post('/api/packages', requireApprovedAny, async (req, res) => {
   } catch (err) {
     console.error('Create package error:', err);
     res.status(500).json({ error: 'Failed to create package: ' + err.message });
-  } finally {
-    pkgCreateLocks.delete(lockKey);
   }
 });
 
@@ -1308,19 +1266,7 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
     const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const rows = await upstream.json();
     const active = (Array.isArray(rows) ? rows : []).find(p => p.used_sessions < p.total_sessions);
-    if (active) return res.json(active);
-    // Optional: no exact-name package, but ONE similar-name active package exists
-    // ("Nabila" / "Nabila barakat"). Flagged so the app can ask "same patient?".
-    if (req.query.allowSimilar === '1') {
-      const allRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?order=created_at.asc`, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
-      const all = await allRes.json();
-      const similarActive = (Array.isArray(all) ? all : []).filter(p => p.used_sessions < p.total_sessions && samePatientLoosely(p.patient_name, patientName));
-      const distinctNames = new Set(similarActive.map(p => normalizePkgName(p.patient_name)));
-      if (similarActive.length > 0 && distinctNames.size === 1) {
-        return res.json({ ...similarActive[0], matched_by_similar_name: true });
-      }
-    }
-    res.json(null);
+    res.json(active || null);
   } catch (err) {
     console.error('Active package lookup error:', err);
     res.status(500).json({ error: 'Failed to look up package: ' + err.message });
@@ -1374,6 +1320,173 @@ app.get('/api/packages/active', requireApprovedAny, async (req, res) => {
   } catch (err) {
     console.error('Active packages list error:', err);
     res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ---- GET /api/packages/dormant ---- (patients with sessions left on an unfinished package who haven't been in for a while and have nothing booked)
+app.get('/api/packages/dormant', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const minDays = Math.max(1, parseInt(req.query.days, 10) || 14);
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const pkgRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?order=created_at.asc`, { headers });
+    const rows = await pkgRes.json();
+    if (!pkgRes.ok) throw new Error(JSON.stringify(rows));
+    const active = (Array.isArray(rows) ? rows : []).filter(p => p.used_sessions < p.total_sessions);
+    const since = new Date(Date.now() - 400 * 86400000).toISOString();
+    const apRes = await fetch(`${SUPABASE_URL}/rest/v1/appointments?select=patient_name,patient_phone,start_time,status&deleted_at=is.null&start_time=gte.${encodeURIComponent(since)}&order=start_time.desc&limit=8000`, { headers });
+    const apRows = apRes.ok ? await apRes.json() : [];
+    const now = Date.now();
+    const info = new Map(); // lower-case patient name -> { lastPast, nextFuture, phone }
+    (Array.isArray(apRows) ? apRows : []).forEach(a => {
+      if (a.status === 'cancelled') return;
+      const k = (a.patient_name || '').trim().toLowerCase();
+      if (!k) return;
+      const t = new Date(a.start_time).getTime();
+      if (isNaN(t)) return;
+      let i = info.get(k);
+      if (!i) { i = { lastPast: 0, nextFuture: 0, phone: null }; info.set(k, i); }
+      if (a.patient_phone && !i.phone) i.phone = a.patient_phone; // rows come newest first
+      if (t <= now) { if (t > i.lastPast) i.lastPast = t; }
+      else if (!i.nextFuture || t < i.nextFuture) i.nextFuture = t;
+    });
+    const out = [];
+    active.forEach(p => {
+      const i = info.get((p.patient_name || '').trim().toLowerCase()) || { lastPast: 0, nextFuture: 0, phone: null };
+      if (i.nextFuture) return; // already has a visit booked — not dormant
+      const ref = i.lastPast || new Date(p.created_at).getTime();
+      const daysSince = Math.floor((now - ref) / 86400000);
+      if (isNaN(daysSince) || daysSince < minDays) return;
+      out.push({ ...p, last_visit: i.lastPast ? new Date(i.lastPast).toISOString() : null, days_since: daysSince, patient_phone: i.phone });
+    });
+    out.sort((a, b) => b.days_since - a.days_since);
+    res.json(out);
+  } catch (err) {
+    console.error('Dormant packages list error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ---- POST /api/packages/:id/followup ---- (record the outcome of chasing a patient: contacted / continuing / not_continuing / no_answer; status null clears it)
+app.post('/api/packages/:id/followup', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const allowed = ['contacted', 'continuing', 'not_continuing', 'no_answer'];
+  const status = req.body && req.body.status ? String(req.body.status) : null;
+  if (status && !allowed.includes(status)) return res.status(400).json({ error: 'Unknown status.' });
+  const patch = { followup_status: status, followup_at: status ? new Date().toISOString() : null };
+  if (req.body && typeof req.body.note === 'string') patch.followup_note = req.body.note.trim().slice(0, 500) || null;
+  if (!status) patch.followup_note = null;
+  try {
+    const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`, {
+      method: 'PATCH',
+      headers: {
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify(patch),
+    });
+    const updated = await patchRes.json();
+    if (!patchRes.ok) throw new Error(JSON.stringify(updated));
+    res.json(Array.isArray(updated) ? updated[0] : updated);
+  } catch (err) {
+    console.error('Package followup error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ---- GET /api/appointments/undocumented?start=&end= ---- (visits that already started in the given window but have no session note saved for that patient yet — the "documentation reminder")
+app.get('/api/appointments/undocumented', requireApprovedDoctor, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const s = new Date(String(req.query.start || '')), e = new Date(String(req.query.end || ''));
+  if (isNaN(s.getTime()) || isNaN(e.getTime()) || e < s || e - s > 8 * 86400000) return res.status(400).json({ error: 'Bad start/end.' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const apRes = await fetch(`${SUPABASE_URL}/rest/v1/appointments?start_time=gte.${encodeURIComponent(s.toISOString())}&start_time=lte.${encodeURIComponent(e.toISOString())}&deleted_at=is.null&order=start_time.asc&limit=500`, { headers });
+    const appts = await apRes.json();
+    if (!apRes.ok) throw new Error(JSON.stringify(appts));
+    const seeAll = hasPermission(req.doctor, 'view_other_patients');
+    const myName = String(req.doctor.name || req.doctor.email || '').trim().toLowerCase();
+    const myColor = req.doctor.color || null;
+    const now = Date.now();
+    const due = (Array.isArray(appts) ? appts : []).filter(a => {
+      if (a.status === 'cancelled') return false;
+      if (new Date(a.start_time).getTime() > now) return false; // hasn't happened yet
+      if (seeAll) return true;
+      return String(a.doctor_name || '').trim().toLowerCase() === myName || (myColor && a.doctor_color === myColor);
+    });
+    if (due.length === 0) return res.json([]);
+    const sesRes = await fetch(`${SUPABASE_URL}/rest/v1/sessions?select=patient_name,created_at,updated_at&updated_at=gte.${encodeURIComponent(s.toISOString())}&limit=3000`, { headers });
+    const ses = sesRes.ok ? await sesRes.json() : [];
+    const documented = new Set((Array.isArray(ses) ? ses : []).map(x => String(x.patient_name || '').trim().toLowerCase()));
+    res.json(due
+      .filter(a => !documented.has(String(a.patient_name || '').trim().toLowerCase()))
+      .map(a => ({ id: a.id, patient_name: a.patient_name, start_time: a.start_time, visit_type: a.visit_type || null, doctor_name: a.doctor_name || null, arrived_at: a.arrived_at || null })));
+  } catch (err) {
+    console.error('Undocumented visits error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ---- POST /api/packages/:id/share-link ---- (creates, once, a private link the patient can open to see their own remaining sessions and balance)
+app.post('/api/packages/:id/share-link', requireApprovedAny, async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' };
+    const getRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}&select=id,share_token`, { headers });
+    const rows = await getRes.json();
+    if (!getRes.ok) throw new Error(JSON.stringify(rows));
+    if (!Array.isArray(rows) || !rows[0]) return res.status(404).json({ error: 'Package not found.' });
+    let token = rows[0].share_token;
+    if (!token) {
+      token = crypto.randomBytes(12).toString('hex');
+      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`, {
+        method: 'PATCH', headers: { ...headers, Prefer: 'return=minimal' }, body: JSON.stringify({ share_token: token }),
+      });
+      if (!patchRes.ok) throw new Error(await patchRes.text());
+    }
+    res.json({ url: `${PUBLIC_BASE_URL}/p/${token}` });
+  } catch (err) {
+    console.error('Package share-link error:', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ---- GET /p/:token ---- (PUBLIC page for the patient: sessions left + money left on their own package, nothing else)
+app.get('/p/:token', async (req, res) => {
+  const page = (body, status) => res.status(status || 200).set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(
+    `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>باكدج العلاج الطبيعي</title>` +
+    `<style>body{margin:0;background:#f6f4ee;color:#12363a;font-family:Tahoma,Arial,sans-serif;padding:20px}.c{max-width:420px;margin:24px auto;background:#fff;border:1px solid #dad6ca;border-radius:18px;padding:26px;text-align:center}` +
+    `h1{font-size:1.15rem;margin:0 0 4px}.big{font-size:3.2rem;font-weight:800;color:#12363a;line-height:1.1;margin:14px 0 2px}.sub{color:#5c7478;font-size:.9rem}.bar{height:12px;background:#e7e3d8;border-radius:99px;overflow:hidden;margin:16px 0}.bar i{display:block;height:100%;background:#e8a33d}` +
+    `.row{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid #eee;font-size:.95rem}.due{color:#b3261e;font-weight:700}.ok{color:#1b8a4a;font-weight:700}.f{margin-top:18px;font-size:.8rem;color:#8a938e}</style></head><body><div class="c">${body}</div></body></html>`);
+  const token = String(req.params.token || '');
+  if (!/^[a-f0-9]{24}$/.test(token) || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) return page('<h1>اللينك غير صحيح</h1><div class="sub">اتأكد من اللينك أو كلم العيادة.</div>', 404);
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/packages?share_token=eq.${token}&select=patient_name,total_sessions,used_sessions,total_price,amount_paid`, {
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
+    });
+    const rows = await r.json();
+    if (!r.ok || !Array.isArray(rows) || !rows[0]) return page('<h1>اللينك غير صحيح</h1><div class="sub">اتأكد من اللينك أو كلم العيادة.</div>', 404);
+    const p = rows[0];
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const total = Number(p.total_sessions) || 0, used = Math.min(Number(p.used_sessions) || 0, total), left = Math.max(0, total - used);
+    const pct = total ? Math.round(used / total * 100) : 0;
+    let money = '';
+    if (p.total_price != null) {
+      const due = Math.max(0, Math.round(Number(p.total_price) - Number(p.amount_paid || 0)));
+      money = `<div class="row"><span>سعر الباكدج</span><span>${Math.round(Number(p.total_price)).toLocaleString('en-US')} جنيه</span></div>` +
+        `<div class="row"><span>المدفوع</span><span>${Math.round(Number(p.amount_paid || 0)).toLocaleString('en-US')} جنيه</span></div>` +
+        `<div class="row"><span>المتبقي عليك</span><span class="${due > 0 ? 'due' : 'ok'}">${due > 0 ? due.toLocaleString('en-US') + ' جنيه' : 'مدفوع بالكامل ✓'}</span></div>`;
+    }
+    const clinicPhone = process.env.CLINIC_PHONE || '01121081817';
+    page(`<h1>أهلاً ${esc(p.patient_name)} 🌷</h1><div class="sub">باكدجك في عيادة Empower</div>` +
+      (left > 0 ? `<div class="big">${left}</div><div class="sub">${left === 1 ? 'جلسة متبقية' : 'جلسات متبقية'} من ${total}</div>` : `<div class="big" style="font-size:1.6rem">الباكدج خلص ✓</div><div class="sub">استخدمت ${total} من ${total} جلسة</div>`) +
+      `<div class="bar"><i style="width:${pct}%"></i></div><div class="row"><span>الجلسات المستخدمة</span><span>${used} من ${total}</span></div>${money}` +
+      `<div class="f">للحجز أو الاستفسار كلمنا: ${esc(clinicPhone)}</div>`);
+  } catch (err) {
+    console.error('Public package page error:', err);
+    page('<h1>حصلت مشكلة</h1><div class="sub">جرب تاني بعد شوية.</div>', 500);
   }
 });
 
@@ -2327,6 +2440,37 @@ app.post('/api/sessions/:id/images', requireApprovedDoctor, async (req, res) => 
   } catch (err) {
     console.error('Image upload error:', err);
     res.status(500).json({ error: 'Failed to upload image: ' + err.message });
+  }
+});
+
+// Videos go in the same private bucket as the images (so the existing gallery,
+// signed links and delete all work for them). The browser sends the raw file;
+// 50 MB is Supabase's default per-file limit on the free plan.
+const VIDEO_MAX_BYTES = 50 * 1024 * 1024;
+const VIDEO_EXT = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm', 'video/x-m4v': 'm4v', 'video/3gpp': '3gp', 'video/x-matroska': 'mkv' };
+app.post('/api/sessions/:id/videos', requireApprovedDoctor, express.raw({ type: () => true, limit: VIDEO_MAX_BYTES }), async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
+  const mimeType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (!mimeType.startsWith('video/')) return res.status(400).json({ error: 'That file is not a video.' });
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: 'Empty video.' });
+  try {
+    const ext = VIDEO_EXT[mimeType] || 'mp4';
+    const base = String(req.query.filename || 'video').replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) || 'video';
+    const path = `${req.params.id}/${Date.now()}_${base}.${ext}`;
+    const upstream = await fetch(`${SUPABASE_URL}/storage/v1/object/${IMAGE_BUCKET}/${path}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': mimeType, 'x-upsert': 'false' },
+      body: req.body,
+    });
+    const data = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      console.error('Video upload failed:', data);
+      return res.status(500).json({ error: data.message || 'Failed to upload video (check the storage bucket allows video files and the size limit).' });
+    }
+    res.json({ ok: true, path });
+  } catch (err) {
+    console.error('Video upload error:', err);
+    res.status(500).json({ error: 'Failed to upload video: ' + err.message });
   }
 });
 
