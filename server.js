@@ -1439,6 +1439,7 @@ app.post('/api/packages/:id/share-link', requireApprovedAny, async (req, res) =>
     if (!getRes.ok) throw new Error(JSON.stringify(rows));
     if (!Array.isArray(rows) || !rows[0]) return res.status(404).json({ error: 'Package not found.' });
     let token = rows[0].share_token;
+    const markSent = !!(req.body && req.body.markSent);
     // Short links (8 characters). Older long links are replaced by a short one the next time the button is used.
     if (!token || token.length > 10) {
       const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -1447,6 +1448,11 @@ app.post('/api/packages/:id/share-link', requireApprovedAny, async (req, res) =>
         method: 'PATCH', headers: { ...headers, Prefer: 'return=minimal' }, body: JSON.stringify({ share_token: token }),
       });
       if (!patchRes.ok) throw new Error(await patchRes.text());
+    }
+    if (markSent) {
+      await fetch(`${SUPABASE_URL}/rest/v1/packages?id=eq.${encodeURIComponent(req.params.id)}`, {
+        method: 'PATCH', headers: { ...headers, Prefer: 'return=minimal' }, body: JSON.stringify({ share_sent_at: new Date().toISOString() }),
+      }).catch(() => {});
     }
     res.json({ url: `${PUBLIC_BASE_URL}/e/${token}` });
   } catch (err) {
