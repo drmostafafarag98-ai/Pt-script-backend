@@ -1446,7 +1446,7 @@ app.post('/api/packages/:id/share-link', requireApprovedAny, async (req, res) =>
       });
       if (!patchRes.ok) throw new Error(await patchRes.text());
     }
-    res.json({ url: `${PUBLIC_BASE_URL}/p/${token}` });
+    res.json({ url: `${PUBLIC_BASE_URL}/empower/${token}` });
   } catch (err) {
     console.error('Package share-link error:', err);
     res.status(500).json({ error: 'Failed: ' + err.message });
@@ -1454,39 +1454,41 @@ app.post('/api/packages/:id/share-link', requireApprovedAny, async (req, res) =>
 });
 
 // ---- GET /p/:token ---- (PUBLIC page for the patient: sessions left + money left on their own package, nothing else)
-app.get('/p/:token', async (req, res) => {
+app.get(['/p/:token', '/empower/:token'], async (req, res) => {
   const page = (body, status) => res.status(status || 200).set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(
-    `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>باكدج العلاج الطبيعي</title>` +
-    `<style>body{margin:0;background:#f6f4ee;color:#12363a;font-family:Tahoma,Arial,sans-serif;padding:20px}.c{max-width:420px;margin:24px auto;background:#fff;border:1px solid #dad6ca;border-radius:18px;padding:26px;text-align:center}` +
-    `h1{font-size:1.15rem;margin:0 0 4px}.big{font-size:3.2rem;font-weight:800;color:#12363a;line-height:1.1;margin:14px 0 2px}.sub{color:#5c7478;font-size:.9rem}.bar{height:12px;background:#e7e3d8;border-radius:99px;overflow:hidden;margin:16px 0}.bar i{display:block;height:100%;background:#e8a33d}` +
-    `.row{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid #eee;font-size:.95rem}.due{color:#b3261e;font-weight:700}.ok{color:#1b8a4a;font-weight:700}.f{margin-top:18px;font-size:.8rem;color:#8a938e}</style></head><body><div class="c">${body}</div></body></html>`);
+    `<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Empower Physiotherapy – My Package</title>` +
+    `<style>body{margin:0;background:#f6f4ee;color:#12363a;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;padding:20px}.c{max-width:420px;margin:24px auto;background:#fff;border:1px solid #dad6ca;border-radius:18px;padding:26px;text-align:center}` +
+    `.brand{font-size:.78rem;letter-spacing:.14em;text-transform:uppercase;color:#b07a1f;font-weight:700;margin-bottom:10px}h1{font-size:1.15rem;margin:0 0 4px}.big{font-size:3.2rem;font-weight:800;color:#12363a;line-height:1.1;margin:14px 0 2px}.sub{color:#5c7478;font-size:.9rem}.bar{height:12px;background:#e7e3d8;border-radius:99px;overflow:hidden;margin:16px 0}.bar i{display:block;height:100%;background:#e8a33d}` +
+    `.row{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid #eee;font-size:.95rem}.due{color:#b3261e;font-weight:700}.ok{color:#1b8a4a;font-weight:700}.f{margin-top:18px;font-size:.8rem;color:#8a938e}</style></head><body><div class="c"><div class="brand">Empower Physiotherapy</div>${body}</div></body></html>`);
+  const bad = '<h1>Link not valid</h1><div class="sub">Please check the link or contact the clinic.</div>';
   const token = String(req.params.token || '');
-  if (!/^[a-f0-9]{24}$/.test(token) || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) return page('<h1>اللينك غير صحيح</h1><div class="sub">اتأكد من اللينك أو كلم العيادة.</div>', 404);
+  if (!/^[a-f0-9]{24}$/.test(token) || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) return page(bad, 404);
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/packages?share_token=eq.${token}&select=patient_name,total_sessions,used_sessions,total_price,amount_paid`, {
       headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` },
     });
     const rows = await r.json();
-    if (!r.ok || !Array.isArray(rows) || !rows[0]) return page('<h1>اللينك غير صحيح</h1><div class="sub">اتأكد من اللينك أو كلم العيادة.</div>', 404);
+    if (!r.ok || !Array.isArray(rows) || !rows[0]) return page(bad, 404);
     const p = rows[0];
     const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const total = Number(p.total_sessions) || 0, used = Math.min(Number(p.used_sessions) || 0, total), left = Math.max(0, total - used);
     const pct = total ? Math.round(used / total * 100) : 0;
+    const egp = n => Math.round(n).toLocaleString('en-US') + ' EGP';
     let money = '';
     if (p.total_price != null) {
       const due = Math.max(0, Math.round(Number(p.total_price) - Number(p.amount_paid || 0)));
-      money = `<div class="row"><span>سعر الباكدج</span><span>${Math.round(Number(p.total_price)).toLocaleString('en-US')} جنيه</span></div>` +
-        `<div class="row"><span>المدفوع</span><span>${Math.round(Number(p.amount_paid || 0)).toLocaleString('en-US')} جنيه</span></div>` +
-        `<div class="row"><span>المتبقي عليك</span><span class="${due > 0 ? 'due' : 'ok'}">${due > 0 ? due.toLocaleString('en-US') + ' جنيه' : 'مدفوع بالكامل ✓'}</span></div>`;
+      money = `<div class="row"><span>Package price</span><span>${egp(Number(p.total_price))}</span></div>` +
+        `<div class="row"><span>Paid</span><span>${egp(Number(p.amount_paid || 0))}</span></div>` +
+        `<div class="row"><span>Remaining balance</span><span class="${due > 0 ? 'due' : 'ok'}">${due > 0 ? egp(due) : 'Fully paid ✓'}</span></div>`;
     }
     const clinicPhone = process.env.CLINIC_PHONE || '01121081817';
-    page(`<h1>أهلاً ${esc(p.patient_name)} 🌷</h1><div class="sub">باكدجك في عيادة Empower</div>` +
-      (left > 0 ? `<div class="big">${left}</div><div class="sub">${left === 1 ? 'جلسة متبقية' : 'جلسات متبقية'} من ${total}</div>` : `<div class="big" style="font-size:1.6rem">الباكدج خلص ✓</div><div class="sub">استخدمت ${total} من ${total} جلسة</div>`) +
-      `<div class="bar"><i style="width:${pct}%"></i></div><div class="row"><span>الجلسات المستخدمة</span><span>${used} من ${total}</span></div>${money}` +
-      `<div class="f">للحجز أو الاستفسار كلمنا: ${esc(clinicPhone)}</div>`);
+    page(`<h1>Hello ${esc(p.patient_name)} 🌷</h1><div class="sub">Your package status</div>` +
+      (left > 0 ? `<div class="big">${left}</div><div class="sub">${left === 1 ? 'session' : 'sessions'} remaining out of ${total}</div>` : `<div class="big" style="font-size:1.6rem">Package completed ✓</div><div class="sub">You used ${total} of ${total} sessions</div>`) +
+      `<div class="bar"><i style="width:${pct}%"></i></div><div class="row"><span>Sessions used</span><span>${used} of ${total}</span></div>${money}` +
+      `<div class="f">To book or ask a question, contact us: ${esc(clinicPhone)}</div>`);
   } catch (err) {
     console.error('Public package page error:', err);
-    page('<h1>حصلت مشكلة</h1><div class="sub">جرب تاني بعد شوية.</div>', 500);
+    page('<h1>Something went wrong</h1><div class="sub">Please try again in a moment.</div>', 500);
   }
 });
 
