@@ -1331,6 +1331,10 @@ app.get('/api/packages/active-by-patient', requireApprovedAny, async (req, res) 
   const { patientName } = req.query;
   if (!patientName) return res.status(400).json({ error: 'Missing patientName.' });
   try {
+    if (isOwnOnly(req.doctor)) {
+      const mine = await ownPatientSet(req.doctor);
+      if (!mine.has(String(patientName).trim().toLowerCase())) return res.json(null);
+    }
     // Oldest-first (FIFO): if a patient buys a new package while an older
     // one still has sessions left, the older package must keep being the
     // one sessions get consumed from until it's finished — otherwise its
@@ -1409,7 +1413,16 @@ app.get('/api/packages/duplicate-report', requireApprovedAny, async (req, res) =
       const g = groups.find(gr => gr.some(q => samePatientLoosely(q.patient_name, p.patient_name)));
       if (g) g.push(p); else groups.push([p]);
     });
-    const dupGroups = groups.filter(g => g.length >= 2 && g.some(p => p.used_sessions < p.total_sessions));
+    // Only SUSPICIOUS cases: a normal renewal (old package finished, new one started) is NOT a duplicate.
+    // Suspicious = 2+ unfinished packages at the same time, OR two packages created within 10 minutes.
+    const dupGroups = groups.filter(g => {
+      if (g.length < 2) return false;
+      const unfinished = g.filter(p => p.used_sessions < p.total_sessions).length;
+      if (unfinished >= 2) return true;
+      const times = g.map(p => new Date(p.created_at).getTime()).sort((x, y) => x - y);
+      for (let i = 1; i < times.length; i++) if (times[i] - times[i - 1] < 10 * 60000) return true;
+      return false;
+    });
     if (dupGroups.length === 0) return res.json([]);
     const apRes = await fetch(`${SUPABASE_URL}/rest/v1/appointments?select=id,patient_name,start_time,status,notes&notes=not.is.null&deleted_at=is.null&status=neq.cancelled&order=start_time.asc&limit=6000`, { headers });
     const apRows = apRes.ok ? await apRes.json() : [];
