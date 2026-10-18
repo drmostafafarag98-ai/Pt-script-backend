@@ -3699,7 +3699,7 @@ button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;m
 .hp{position:absolute;left:-9999px;height:0;overflow:hidden}.hide{display:none}
 </style></head><body><div class="c" id="card">
 <img class="logo" src="/clinic-logo.png" alt="Empower">
-<h1>Training Application - New Branch</h1>
+<h1>Training Application</h1>
 <div class="sub">Fill in your details and upload your CV. We review every application and contact shortlisted candidates on WhatsApp.</div>
 <div class="warn"><strong>Important before you apply:</strong> the training is <strong>intensive: one full week, 6 days in a row with no rest day in between</strong>. Apply only if you can commit to all of those days.</div>
 <form id="f" novalidate>
@@ -3711,7 +3711,7 @@ button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;m
 <label>Where do you live? *</label>
 <div class="opts" id="areaOpts"></div>
 <div id="areaOtherWrap" class="hide"><label>Write your area</label><input type="text" id="areaOther" maxlength="80"></div>
-<label>Can you easily reach the new branch? <small>(it is located between Rehab, Tagamoa, Shorouk and Madinaty)</small></label>
+<label>Can you easily reach the training location? <small>(it is located between Rehab, Tagamoa, Shorouk and Madinaty)</small></label>
 <select id="commute"><option value="">Select</option><option value="yes">Yes, easily</option><option value="hard">Possible, but difficult</option><option value="no">No</option></select>
 <label>Do you currently work at another clinic or center? *</label>
 <div class="opts"><label class="opt"><input type="radio" name="works" value="yes"> Yes</label><label class="opt"><input type="radio" name="works" value="no"> No</label></div>
@@ -3721,7 +3721,6 @@ button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;m
 <label>Can you commit to the training <strong>6 days in a row for one week</strong>? *</label>
 <div class="opts"><label class="opt"><input type="radio" name="commit6" value="yes"> Yes, I can commit to all the days</label><label class="opt"><input type="radio" name="commit6" value="no"> No, I cannot</label></div>
 <label>Your preferred hours, and anything that might prevent you <small>(optional)</small></label><textarea id="availability" maxlength="500"></textarea>
-<label>Courses or certificates <small>(optional)</small></label><textarea id="courses" maxlength="800"></textarea>
 <label>Upload your CV * <small>(PDF, Word or image - max 6 MB)</small></label>
 <input type="file" id="cv" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
 <div class="err" id="err"></div>
@@ -3753,7 +3752,7 @@ button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;m
     rd.onerror=function(){fail('Could not read the file. Try another file.')};
     rd.onload=function(){
       var b64=String(rd.result).split(',')[1]||'';
-      var body={fullName:name,phone:phone,graduationYear:grad,university:$('university').value.trim(),area:area,areaOther:$('areaOther').value.trim(),commute:$('commute').value,worksElsewhere:works==='yes',commit6:commit==='yes',worksDetails:$('worksDetails').value.trim(),experience:$('experience').value,availability:$('availability').value.trim(),courses:$('courses').value.trim(),website:$('website').value,cvName:file.name,cvType:file.type,cvBase64:b64};
+      var body={fullName:name,phone:phone,graduationYear:grad,university:$('university').value.trim(),area:area,areaOther:$('areaOther').value.trim(),commute:$('commute').value,worksElsewhere:works==='yes',commit6:commit==='yes',worksDetails:$('worksDetails').value.trim(),experience:$('experience').value,availability:$('availability').value.trim(),website:$('website').value,cvName:file.name,cvType:file.type,cvBase64:b64};
       fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){return r.json().catch(function(){return{}}).then(function(j){return{ok:r.ok,j:j}})})
       .then(function(x){if(!x.ok)return fail(x.j.error||'Something went wrong. Please try again.');
@@ -3795,7 +3794,7 @@ app.post('/api/apply', async (req, res) => {
       full_name: fullName, phone, graduation_year: gradYear, university: clean(b.university, 120) || null,
       area, area_other: clean(b.areaOther, 80) || null, commute: ['yes', 'hard', 'no'].includes(b.commute) ? b.commute : null,
       works_elsewhere: b.worksElsewhere, can_commit_6_days: b.commit6, works_details: clean(b.worksDetails, 500) || null, experience: clean(b.experience, 40) || null,
-      availability: clean(b.availability, 500) || null, courses: clean(b.courses, 800) || null,
+      availability: clean(b.availability, 500) || null,
       cv_path: cvPath, cv_name: clean(b.cvName, 150) || null,
     };
     const ins = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(row) });
