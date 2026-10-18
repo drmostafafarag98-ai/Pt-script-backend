@@ -3695,9 +3695,10 @@ textarea{min-height:80px;resize:vertical}.opts{display:flex;flex-wrap:wrap;gap:8
 .opt input{margin:0}button{margin-top:22px;width:100%;padding:14px;border:0;border-radius:10px;background:#12363a;color:#fff;font-size:1rem;font-weight:700;cursor:pointer}
 button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;min-height:1.2em}.ok{text-align:center;padding:30px 0}
 .warn{background:#fff6e0;border:1px solid #e8cf8a;border-radius:10px;padding:12px 14px;font-size:.92rem;line-height:1.7;margin-bottom:6px}
+.logo{display:block;max-width:220px;width:60%;height:auto;margin:0 auto 14px}
 .hp{position:absolute;left:-9999px;height:0;overflow:hidden}.hide{display:none}
 </style></head><body><div class="c" id="card">
-<div class="brand">Empower Physical Therapy</div>
+<img class="logo" src="/clinic-logo.png" alt="Empower">
 <h1>Training Application - New Branch</h1>
 <div class="sub">Fill in your details and upload your CV. We review every application and contact shortlisted candidates on WhatsApp.</div>
 <div class="warn"><strong>Important before you apply:</strong> the training is <strong>intensive: one full week, 6 days in a row with no rest day in between</strong>. Apply only if you can commit to all of those days.</div>
@@ -3756,7 +3757,7 @@ button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;m
       fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){return r.json().catch(function(){return{}}).then(function(j){return{ok:r.ok,j:j}})})
       .then(function(x){if(!x.ok)return fail(x.j.error||'Something went wrong. Please try again.');
-        $('card').innerHTML='<div class="ok"><div class="brand">Empower Physical Therapy</div><h1>We received your application. Thank you!</h1><div class="sub">We will review all applications and contact shortlisted candidates on WhatsApp.</div></div>';})
+        $('card').innerHTML='<div class="ok"><img class="logo" src="/clinic-logo.png" alt="Empower"><h1>We received your application. Thank you!</h1><div class="sub">We will review all applications and contact shortlisted candidates on WhatsApp.</div></div>';})
       .catch(function(){fail('No internet connection. Please try again.')});
     };
     rd.readAsDataURL(file);
