@@ -3663,6 +3663,199 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// =====================================================================
+// ---- Training applicants (public application form + owner-only list) ----
+// Public:  GET /apply (the form page)   POST /api/apply (submit, no login)
+// Owner:   GET /api/applicants, PATCH /api/applicants/:id, GET /api/applicants/:id/cv, DELETE /api/applicants/:id
+// CV files live in a PRIVATE Supabase storage bucket "applicant-cvs".
+// =====================================================================
+const APPLICANT_BUCKET = 'applicant-cvs';
+const CV_MAX_BYTES = 6 * 1024 * 1024;
+const CV_TYPES = { 'application/pdf': 'pdf', 'application/msword': 'doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'image/jpeg': 'jpg', 'image/png': 'png' };
+const applyHits = new Map(); // ip -> [timestamps]
+function applyRateLimited(ip) {
+  const now = Date.now();
+  const arr = (applyHits.get(ip) || []).filter(t => now - t < 3600 * 1000);
+  if (arr.length >= 8) { applyHits.set(ip, arr); return true; }
+  arr.push(now); applyHits.set(ip, arr); return false;
+}
+const APPLY_AREAS = ['Rehab', 'Tagamoa', 'Shorouk', 'Madinaty', 'Other'];
+
+const APPLY_PAGE = String.raw`<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Empower - Training Application</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f6f4ee;color:#12363a;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;padding:16px}
+.c{max-width:560px;margin:12px auto;background:#fff;border:1px solid #e4dfd0;border-radius:14px;padding:22px}
+.brand{font-size:.78rem;letter-spacing:.14em;text-transform:uppercase;color:#b07a1f;font-weight:700;margin-bottom:8px}
+h1{font-size:1.25rem;margin:0 0 6px}.sub{color:#5b6863;font-size:.9rem;margin-bottom:18px;line-height:1.6}
+label{display:block;font-weight:600;font-size:.9rem;margin:16px 0 6px}label small{font-weight:400;color:#7a857f}
+input[type=text],input[type=tel],select,textarea{width:100%;padding:11px 12px;border:1px solid #cfd6d2;border-radius:10px;font-size:1rem;background:#fff;color:#12363a;font-family:inherit}
+textarea{min-height:80px;resize:vertical}.opts{display:flex;flex-wrap:wrap;gap:8px}
+.opt{display:flex;align-items:center;gap:6px;border:1px solid #cfd6d2;border-radius:10px;padding:9px 12px;font-weight:500;cursor:pointer;margin:0}
+.opt input{margin:0}button{margin-top:22px;width:100%;padding:14px;border:0;border-radius:10px;background:#12363a;color:#fff;font-size:1rem;font-weight:700;cursor:pointer}
+button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;min-height:1.2em}.ok{text-align:center;padding:30px 0}
+.warn{background:#fff6e0;border:1px solid #e8cf8a;border-radius:10px;padding:12px 14px;font-size:.92rem;line-height:1.7;margin-bottom:6px}
+.hp{position:absolute;left:-9999px;height:0;overflow:hidden}.hide{display:none}
+</style></head><body><div class="c" id="card">
+<div class="brand">Empower Physical Therapy</div>
+<h1>Training Application - New Branch</h1>
+<div class="sub">Fill in your details and upload your CV. We review every application and contact shortlisted candidates on WhatsApp.</div>
+<div class="warn"><strong>Important before you apply:</strong> the training is <strong>intensive: one full week, 6 days in a row with no rest day in between</strong>. Apply only if you can commit to all of those days.</div>
+<form id="f" novalidate>
+<div class="hp"><label>Website<input type="text" id="website" tabindex="-1" autocomplete="off"></label></div>
+<label>Full name *</label><input type="text" id="fullName" maxlength="120" autocomplete="name">
+<label>WhatsApp number *</label><input type="tel" id="phone" maxlength="20" inputmode="tel" autocomplete="tel">
+<label>Graduation year *</label><select id="gradYear"><option value="">Select</option></select>
+<label>University</label><input type="text" id="university" maxlength="120">
+<label>Where do you live? *</label>
+<div class="opts" id="areaOpts"></div>
+<div id="areaOtherWrap" class="hide"><label>Write your area</label><input type="text" id="areaOther" maxlength="80"></div>
+<label>Can you easily reach the new branch? <small>(it is located between Rehab, Tagamoa, Shorouk and Madinaty)</small></label>
+<select id="commute"><option value="">Select</option><option value="yes">Yes, easily</option><option value="hard">Possible, but difficult</option><option value="no">No</option></select>
+<label>Do you currently work at another clinic or center? *</label>
+<div class="opts"><label class="opt"><input type="radio" name="works" value="yes"> Yes</label><label class="opt"><input type="radio" name="works" value="no"> No</label></div>
+<div id="worksWrap" class="hide"><label>Where, and what are your working days and hours?</label><textarea id="worksDetails" maxlength="500"></textarea></div>
+<label>Years of experience in physical therapy</label>
+<select id="experience"><option value="">Select</option><option>Less than 1 year</option><option>1 - 2 years</option><option>3 - 5 years</option><option>More than 5 years</option></select>
+<label>Can you commit to the training <strong>6 days in a row for one week</strong>? *</label>
+<div class="opts"><label class="opt"><input type="radio" name="commit6" value="yes"> Yes, I can commit to all the days</label><label class="opt"><input type="radio" name="commit6" value="no"> No, I cannot</label></div>
+<label>Your preferred hours, and anything that might prevent you <small>(optional)</small></label><textarea id="availability" maxlength="500"></textarea>
+<label>Courses or certificates <small>(optional)</small></label><textarea id="courses" maxlength="800"></textarea>
+<label>Upload your CV * <small>(PDF, Word or image - max 6 MB)</small></label>
+<input type="file" id="cv" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
+<div class="err" id="err"></div>
+<button type="submit" id="btn">Submit application</button>
+</form></div>
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var AREAS=[['Rehab','Rehab'],['Tagamoa','Tagamoa'],['Shorouk','Shorouk'],['Madinaty','Madinaty'],['Other','Somewhere else']];
+  var y=new Date().getFullYear();for(var i=y;i>=y-30;i--){var o=document.createElement('option');o.value=i;o.textContent=i;$('gradYear').appendChild(o);}
+  AREAS.forEach(function(a){var l=document.createElement('label');l.className='opt';l.innerHTML='<input type="radio" name="area" value="'+a[0]+'"> '+a[1];$('areaOpts').appendChild(l);});
+  function sel(n){var e=document.querySelector('input[name='+n+']:checked');return e?e.value:'';}
+  document.addEventListener('change',function(){$('areaOtherWrap').className=sel('area')==='Other'?'':'hide';$('worksWrap').className=sel('works')==='yes'?'':'hide';});
+  function fail(m){$('err').textContent=m;$('btn').disabled=false;$('btn').textContent='Submit application';}
+  $('f').addEventListener('submit',function(ev){
+    ev.preventDefault();$('err').textContent='';
+    var name=$('fullName').value.trim(),phone=$('phone').value.replace(/[^0-9+]/g,''),grad=$('gradYear').value,area=sel('area'),works=sel('works'),commit=sel('commit6'),file=$('cv').files[0];
+    if(name.length<3)return fail('Please enter your full name.');
+    if(phone.replace(/\D/g,'').length<10)return fail('Please enter a valid WhatsApp number.');
+    if(!grad)return fail('Please select your graduation year.');
+    if(!area)return fail('Please select where you live.');
+    if(area==='Other'&&!$('areaOther').value.trim())return fail('Please write your area.');
+    if(!works)return fail('Please tell us if you work at another clinic.');
+    if(!commit)return fail('Please answer the 6-day commitment question.');
+    if(!file)return fail('Please upload your CV.');
+    if(file.size>6*1024*1024)return fail('The file is larger than 6 MB.');
+    $('btn').disabled=true;$('btn').textContent='Sending...';
+    var rd=new FileReader();
+    rd.onerror=function(){fail('Could not read the file. Try another file.')};
+    rd.onload=function(){
+      var b64=String(rd.result).split(',')[1]||'';
+      var body={fullName:name,phone:phone,graduationYear:grad,university:$('university').value.trim(),area:area,areaOther:$('areaOther').value.trim(),commute:$('commute').value,worksElsewhere:works==='yes',commit6:commit==='yes',worksDetails:$('worksDetails').value.trim(),experience:$('experience').value,availability:$('availability').value.trim(),courses:$('courses').value.trim(),website:$('website').value,cvName:file.name,cvType:file.type,cvBase64:b64};
+      fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json().catch(function(){return{}}).then(function(j){return{ok:r.ok,j:j}})})
+      .then(function(x){if(!x.ok)return fail(x.j.error||'Something went wrong. Please try again.');
+        $('card').innerHTML='<div class="ok"><div class="brand">Empower Physical Therapy</div><h1>We received your application. Thank you!</h1><div class="sub">We will review all applications and contact shortlisted candidates on WhatsApp.</div></div>';})
+      .catch(function(){fail('No internet connection. Please try again.')});
+    };
+    rd.readAsDataURL(file);
+  });
+})();
+</script></body></html>`;
+
+app.get('/apply', (req, res) => {
+  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(APPLY_PAGE);
+});
+
+app.post('/api/apply', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is not ready. Please try later.' });
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (applyRateLimited(ip)) return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  const b = req.body || {};
+  if (b.website) return res.json({ ok: true }); // honeypot: pretend success
+  const clean = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n);
+  const fullName = clean(b.fullName, 120);
+  const phone = clean(b.phone, 20).replace(/[^0-9+]/g, '');
+  const gradYear = parseInt(b.graduationYear, 10);
+  const area = APPLY_AREAS.includes(b.area) ? b.area : '';
+  if (fullName.length < 3 || phone.replace(/\D/g, '').length < 10 || !gradYear || gradYear < 1990 || gradYear > new Date().getFullYear() + 1 || !area || typeof b.worksElsewhere !== 'boolean' || typeof b.commit6 !== 'boolean')
+    return res.status(400).json({ error: 'Some details are missing or wrong. Please check the form.' });
+  const ext = CV_TYPES[String(b.cvType || '').toLowerCase()];
+  if (!ext || !b.cvBase64) return res.status(400).json({ error: 'File type not accepted. Upload a PDF, Word file or image.' });
+  const bytes = Buffer.from(String(b.cvBase64), 'base64');
+  if (bytes.length < 200 || bytes.length > CV_MAX_BYTES) return res.status(400).json({ error: 'File size is not valid (max 6 MB).' });
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const cvPath = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}/cv.${ext}`;
+    const up = await fetch(`${SUPABASE_URL}/storage/v1/object/${APPLICANT_BUCKET}/${cvPath}`, { method: 'POST', headers: { ...headers, 'Content-Type': String(b.cvType), 'x-upsert': 'false' }, body: bytes });
+    if (!up.ok) { console.error('Applicant CV upload failed:', up.status, await up.text().catch(() => '')); return res.status(500).json({ error: 'Could not save the file. Please try again.' }); }
+    const row = {
+      full_name: fullName, phone, graduation_year: gradYear, university: clean(b.university, 120) || null,
+      area, area_other: clean(b.areaOther, 80) || null, commute: ['yes', 'hard', 'no'].includes(b.commute) ? b.commute : null,
+      works_elsewhere: b.worksElsewhere, can_commit_6_days: b.commit6, works_details: clean(b.worksDetails, 500) || null, experience: clean(b.experience, 40) || null,
+      availability: clean(b.availability, 500) || null, courses: clean(b.courses, 800) || null,
+      cv_path: cvPath, cv_name: clean(b.cvName, 150) || null,
+    };
+    const ins = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(row) });
+    if (!ins.ok) { console.error('Applicant insert failed:', ins.status, await ins.text().catch(() => '')); return res.status(500).json({ error: 'Could not save your application. Please try again.' }); }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Apply error:', err);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+app.get('/api/applicants', requireOwnerDoctor, async (req, res) => {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?order=created_at.desc&limit=2000`, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const data = await r.json();
+    if (!r.ok) return res.status(500).json({ error: (data && data.message) || 'Failed to load applicants.' });
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.patch('/api/applicants/:id', requireOwnerDoctor, async (req, res) => {
+  const b = req.body || {};
+  const patch = {};
+  if (b.status !== undefined) { if (!['new', 'shortlisted', 'interview', 'accepted', 'rejected'].includes(b.status)) return res.status(400).json({ error: 'Bad status.' }); patch.status = b.status; }
+  if (b.rating !== undefined) { const n = b.rating === null ? null : parseInt(b.rating, 10); if (n !== null && !(n >= 1 && n <= 5)) return res.status(400).json({ error: 'Bad rating.' }); patch.rating = n; }
+  if (b.owner_notes !== undefined) patch.owner_notes = String(b.owner_notes || '').slice(0, 2000);
+  if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to update.' });
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'PATCH', headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+    if (!r.ok) return res.status(500).json({ error: 'Update failed.' });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.get('/api/applicants/:id/cv', requireOwnerDoctor, async (req, res) => {
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?id=eq.${encodeURIComponent(req.params.id)}&select=cv_path&limit=1`, { headers });
+    const rows = await r.json();
+    const p = rows && rows[0] && rows[0].cv_path;
+    if (!p) return res.status(404).json({ error: 'No CV.' });
+    const s = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${APPLICANT_BUCKET}/${p}`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ expiresIn: 900 }) });
+    const j = await s.json();
+    if (!s.ok || !j.signedURL) return res.status(500).json({ error: 'Could not open the CV.' });
+    res.json({ url: `${SUPABASE_URL}/storage/v1${j.signedURL}` });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.delete('/api/applicants/:id', requireOwnerDoctor, async (req, res) => {
+  try {
+    const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?id=eq.${encodeURIComponent(req.params.id)}&select=cv_path&limit=1`, { headers });
+    const rows = await r.json();
+    const p = rows && rows[0] && rows[0].cv_path;
+    if (p) await fetch(`${SUPABASE_URL}/storage/v1/object/${APPLICANT_BUCKET}`, { method: 'DELETE', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ prefixes: [p] }) }).catch(() => {});
+    const d = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'DELETE', headers });
+    if (!d.ok) return res.status(500).json({ error: 'Delete failed.' });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
