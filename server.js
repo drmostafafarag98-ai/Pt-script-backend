@@ -3806,7 +3806,7 @@ app.post('/api/apply', async (req, res) => {
   }
 });
 
-app.get('/api/applicants', requireOwnerDoctor, async (req, res) => {
+app.get('/api/applicants', requireOwnerOrPermission('view_applicants'), async (req, res) => {
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?order=created_at.desc&limit=2000`, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
     const data = await r.json();
@@ -3815,7 +3815,7 @@ app.get('/api/applicants', requireOwnerDoctor, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
-app.patch('/api/applicants/:id', requireOwnerDoctor, async (req, res) => {
+app.patch('/api/applicants/:id', requireOwnerOrPermission('view_applicants'), async (req, res) => {
   const b = req.body || {};
   const patch = {};
   if (b.status !== undefined) { if (!['new', 'shortlisted', 'interview', 'accepted', 'rejected'].includes(b.status)) return res.status(400).json({ error: 'Bad status.' }); patch.status = b.status; }
@@ -3829,7 +3829,7 @@ app.patch('/api/applicants/:id', requireOwnerDoctor, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
-app.get('/api/applicants/:id/cv', requireOwnerDoctor, async (req, res) => {
+app.get('/api/applicants/:id/cv', requireOwnerOrPermission('view_applicants'), async (req, res) => {
   try {
     const headers = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
     const r = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?id=eq.${encodeURIComponent(req.params.id)}&select=cv_path&limit=1`, { headers });
