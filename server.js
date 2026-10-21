@@ -2642,10 +2642,34 @@ app.get('/api/sessions', requireApprovedDoctor, async (req, res) => {
     }
     // Without view_other_patients, a doctor only sees their OWN patients'
     // files — not the whole clinic's.
+    const sbHeaders = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` };
     if (!hasPermission(req.doctor, 'view_other_patients') || isOwnOnly(req.doctor)) {
-      url += `&doctor_name=eq.${encodeURIComponent(req.doctor.name || req.doctor.email)}`;
+      // A patient's file belongs to the PATIENT, not to whoever typed the note.
+      // So a doctor sees (a) notes they wrote, plus (b) EVERY note, by anyone,
+      // for patients they have appointments with.
+      const me = req.doctor.name || req.doctor.email;
+      const ar = await fetch(`${SUPABASE_URL}/rest/v1/appointments?select=patient_name&deleted_at=is.null&doctor_name=eq.${encodeURIComponent(me)}&limit=10000`, { headers: sbHeaders });
+      const arows = await ar.json();
+      const myPatients = new Set((Array.isArray(arows) ? arows : []).map(r => String(r.patient_name || '').trim().toLowerCase()).filter(Boolean));
+      const lr = await fetch(`${SUPABASE_URL}/rest/v1/sessions?select=id,patient_name,doctor_name&limit=20000`, { headers: sbHeaders });
+      const lrows = await lr.json();
+      if (!lr.ok || !Array.isArray(lrows)) return res.status(500).json({ error: 'Failed to load sessions.' });
+      const ids = lrows
+        .filter(r => r.doctor_name === me || myPatients.has(String(r.patient_name || '').trim().toLowerCase()))
+        .filter(r => !patientName || String(r.patient_name || '').toLowerCase().includes(String(patientName).toLowerCase()))
+        .map(r => r.id);
+      const out = [];
+      for (let i = 0; i < ids.length; i += 40) {
+        const chunk = ids.slice(i, i + 40).map(x => '"' + String(x).replace(/"/g, '') + '"').join(',');
+        const cr = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=in.(${encodeURIComponent(chunk)})&order=${order === 'asc' ? 'created_at.asc' : 'created_at.desc'}`, { headers: sbHeaders });
+        const crows = await cr.json();
+        if (!cr.ok || !Array.isArray(crows)) return res.status(500).json({ error: 'Failed to load sessions.' });
+        out.push(...crows);
+      }
+      out.sort((a, b) => (order === 'asc' ? 1 : -1) * (new Date(a.created_at) - new Date(b.created_at)));
+      return res.json(out);
     }
-    const upstream = await fetch(url, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const upstream = await fetch(url, { headers: sbHeaders });
     const data = await upstream.text();
     res.status(upstream.status).type('application/json').send(data);
   } catch (err) {
@@ -3854,6 +3878,138 @@ app.delete('/api/applicants/:id', requireOwnerDoctor, async (req, res) => {
     if (!d.ok) return res.status(500).json({ error: 'Delete failed.' });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+
+// =====================================================================
+// ---- Friday event duty: who covers the Friday event, + Telegram reminder 3 days before ----
+// Table: friday_duty (duty_date date PK, doctor_email, doctor_name, reminder_sent_at, reminder_error)
+// The reminder goes out once, 3 days before (Tuesday for a Friday), from 9 AM Cairo time.
+// If the server was asleep then, it sends as soon as it wakes (any time up to the duty day).
+// =====================================================================
+function cairoTodayYmd() { return new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }); }
+function cairoHourNow() { return parseInt(new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo', hour: 'numeric', hour12: false }), 10) % 24; }
+function ymdDiffDays(aYmd, bYmd) { return Math.round((Date.parse(bYmd + 'T00:00:00Z') - Date.parse(aYmd + 'T00:00:00Z')) / 86400000); }
+function isFridayYmd(ymd) { return /^\d{4}-\d{2}-\d{2}$/.test(ymd) && new Date(ymd + 'T00:00:00Z').getUTCDay() === 5; }
+const DUTY_HEADERS = () => ({ apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` });
+
+function buildDutyReminderMessage(doctorName, dutyYmd, daysLeft) {
+  const rawName = String(doctorName || '').trim();
+  const tokens = rawName.split(/\s+/).filter(t => !/^(dr\.?|doctor|د\.?|دكتور|دكتورة)$/i.test(t));
+  const first = (tokens[0] || rawName).trim();
+  const key = first.toLowerCase();
+  const title = ARRIVAL_FEMALE.has(key) ? 'دكتورة' : (ARRIVAL_MALE.has(key) ? 'دكتور' : 'د.');
+  const nameAr = ARRIVAL_AR_NAMES[key] || first;
+  const dateAr = new Date(dutyYmd + 'T12:00:00Z').toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+  const when = daysLeft <= 0 ? 'النهاردة' : (daysLeft === 1 ? 'بكرة' : `كمان ${daysLeft} أيام`);
+  return `${title} ${nameAr} 👋\nتذكير: ${when} (${dateAr}) دورك تغطي الإيفنت بتاع الجمعة ✅\nلو في أي ظرف يمنعك، قول لدكتور مصطفى من دلوقتي عشان نظبط البديل.`;
+}
+
+async function sendDutyReminder(duty) {
+  if (!TELEGRAM_BOT_TOKEN) throw new Error('Telegram bot is not set up on the server.');
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(duty.doctor_email)}&select=name,telegram_chat_id&limit=1`, { headers: DUTY_HEADERS() });
+  const rows = await r.json();
+  const doc = Array.isArray(rows) && rows[0];
+  if (!doc || !doc.telegram_chat_id) throw new Error('This doctor has not linked Telegram yet.');
+  const daysLeft = ymdDiffDays(cairoTodayYmd(), String(duty.duty_date).slice(0, 10));
+  await telegramSend(doc.telegram_chat_id, buildDutyReminderMessage(doc.name || duty.doctor_name, String(duty.duty_date).slice(0, 10), daysLeft));
+}
+async function markDuty(date, patch) {
+  await fetch(`${SUPABASE_URL}/rest/v1/friday_duty?duty_date=eq.${date}`, { method: 'PATCH', headers: { ...DUTY_HEADERS(), 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+}
+
+let dutyRunnerBusy = false;
+async function runFridayDutyReminders() {
+  if (dutyRunnerBusy || !SUPABASE_URL || !SUPABASE_SERVICE_KEY || !TELEGRAM_BOT_TOKEN) return;
+  if (cairoHourNow() < 9) return;
+  dutyRunnerBusy = true;
+  try {
+    const today = cairoTodayYmd();
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/friday_duty?reminder_sent_at=is.null&duty_date=gte.${today}&duty_date=lte.${new Date(Date.parse(today + 'T00:00:00Z') + 3 * 86400000).toISOString().slice(0, 10)}&order=duty_date.asc`, { headers: DUTY_HEADERS() });
+    const rows = await r.json();
+    if (!r.ok || !Array.isArray(rows)) return;
+    for (const duty of rows) {
+      const date = String(duty.duty_date).slice(0, 10);
+      if (duty.reminder_error && duty.reminder_error.startsWith('tried:' + today)) continue; // already failed today, don't spam retries
+      try {
+        await sendDutyReminder(duty);
+        await markDuty(date, { reminder_sent_at: new Date().toISOString(), reminder_error: null });
+        console.log(`[friday-duty] reminder sent for ${date} to ${duty.doctor_email}`);
+      } catch (err) {
+        await markDuty(date, { reminder_error: `tried:${today} ${String(err.message || err).slice(0, 200)}` });
+        console.error('[friday-duty] reminder failed:', err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[friday-duty] runner error:', err.message);
+  } finally {
+    dutyRunnerBusy = false;
+  }
+}
+setInterval(runFridayDutyReminders, 10 * 60 * 1000);
+setTimeout(runFridayDutyReminders, 45 * 1000);
+
+app.get('/api/friday-duty', requireOwnerDoctor, async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const [dr, pr] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/friday_duty?duty_date=gte.${since}&order=duty_date.asc&limit=200`, { headers: DUTY_HEADERS() }),
+      fetch(`${SUPABASE_URL}/rest/v1/doctors?status=eq.approved&role=in.(doctor,owner)&select=email,name,telegram_chat_id&order=name.asc`, { headers: DUTY_HEADERS() }),
+    ]);
+    const duties = await dr.json();
+    const docs = await pr.json();
+    if (!dr.ok) return res.status(500).json({ error: 'Could not load duties. Did you run the friday_duty SQL?' });
+    res.json({
+      telegram_ready: !!TELEGRAM_BOT_TOKEN,
+      duties: Array.isArray(duties) ? duties : [],
+      doctors: (Array.isArray(docs) ? docs : []).map(d => ({ email: d.email, name: d.name, telegram_linked: !!d.telegram_chat_id })),
+    });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.put('/api/friday-duty/:date', requireOwnerDoctor, async (req, res) => {
+  const date = String(req.params.date || '');
+  if (!isFridayYmd(date)) return res.status(400).json({ error: 'That date is not a Friday.' });
+  const email = String((req.body && req.body.doctorEmail) || '').trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: 'Pick a doctor.' });
+  try {
+    const pr = await fetch(`${SUPABASE_URL}/rest/v1/doctors?email=eq.${encodeURIComponent(email)}&status=eq.approved&select=email,name&limit=1`, { headers: DUTY_HEADERS() });
+    const rows = await pr.json();
+    const doc = Array.isArray(rows) && rows[0];
+    if (!doc) return res.status(400).json({ error: 'Doctor not found.' });
+    const up = await fetch(`${SUPABASE_URL}/rest/v1/friday_duty?on_conflict=duty_date`, {
+      method: 'POST',
+      headers: { ...DUTY_HEADERS(), 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ duty_date: date, doctor_email: doc.email, doctor_name: doc.name, reminder_sent_at: null, reminder_error: null }),
+    });
+    if (!up.ok) { console.error('friday_duty upsert failed', up.status, await up.text().catch(() => '')); return res.status(500).json({ error: 'Could not save. Did you run the friday_duty SQL?' }); }
+    res.json({ ok: true });
+    setTimeout(runFridayDutyReminders, 1500); // if it is already inside the 3-day window, remind right away
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.delete('/api/friday-duty/:date', requireOwnerDoctor, async (req, res) => {
+  const date = String(req.params.date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Bad date.' });
+  try {
+    const d = await fetch(`${SUPABASE_URL}/rest/v1/friday_duty?duty_date=eq.${date}`, { method: 'DELETE', headers: DUTY_HEADERS() });
+    if (!d.ok) return res.status(500).json({ error: 'Delete failed.' });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.post('/api/friday-duty/:date/send-reminder', requireOwnerDoctor, async (req, res) => {
+  const date = String(req.params.date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Bad date.' });
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/friday_duty?duty_date=eq.${date}&limit=1`, { headers: DUTY_HEADERS() });
+    const rows = await r.json();
+    const duty = Array.isArray(rows) && rows[0];
+    if (!duty) return res.status(404).json({ error: 'Nobody is assigned that Friday.' });
+    await sendDutyReminder(duty);
+    await markDuty(date, { reminder_sent_at: new Date().toISOString(), reminder_error: null });
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: String(err.message || err) }); }
 });
 
 app.listen(PORT, () => {
