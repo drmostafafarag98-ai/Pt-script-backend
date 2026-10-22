@@ -2604,6 +2604,14 @@ app.post('/api/sessions', requireApprovedDoctor, async (req, res) => {
   const { id, patientName, sessionDate, sessionType, transcript, note } = req.body || {};
   if (!id || !patientName) return res.status(400).json({ error: 'Missing id or patientName.' });
   try {
+    // If this note already exists, keep its original author: someone else
+    // editing it must not move it to their own list.
+    let keepDoctor = null;
+    try {
+      const er = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(id)}&select=doctor_name&limit=1`, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+      const er2 = await er.json();
+      if (Array.isArray(er2) && er2[0] && er2[0].doctor_name) keepDoctor = er2[0].doctor_name;
+    } catch (e) { /* fall back to the editor's name */ }
     const url = `${SUPABASE_URL}/rest/v1/sessions?on_conflict=id`;
     const upstream = await fetch(url, {
       method: 'POST',
@@ -2620,7 +2628,7 @@ app.post('/api/sessions', requireApprovedDoctor, async (req, res) => {
         session_type: sessionType || null,
         transcript: transcript || null,
         note: note || null,
-        doctor_name: req.doctor.name || req.doctor.email,
+        doctor_name: keepDoctor || req.doctor.name || req.doctor.email,
         updated_at: new Date().toISOString(),
       }),
     });
