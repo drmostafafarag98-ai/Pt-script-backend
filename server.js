@@ -4046,6 +4046,355 @@ app.post('/api/friday-duty/:date/send-reminder', requireOwnerDoctor, async (req,
   } catch (err) { res.status(400).json({ error: String(err.message || err) }); }
 });
 
+
+// =====================================================================
+// ---- Online booking (public page /book) ----
+// Patients pick a doctor + time from the doctor's open hours, pay half the
+// fee as a non-refundable InstaPay deposit (upload the screenshot) and the
+// visit lands in the calendar straight away. Patients who already have an
+// active package skip the deposit. Tables: booking_settings, booking_deposits.
+// =====================================================================
+const BOOKING_BUCKET = 'booking-deposits';
+const SHOT_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+const SHOT_MAX_BYTES = 4 * 1024 * 1024;
+const BOOKING_DEFAULTS = {
+  enabled: false, instapay: '', note: '', slot_minutes: 30, min_lead_hours: 2, max_days_ahead: 30,
+  types: [
+    { key: 'checkup', label: 'Check-up', price: 0, visit_type: 'checkup' },
+    { key: 'session1', label: 'Session - 1 body part', price: 500, visit_type: 'session' },
+    { key: 'session2', label: 'Session - 2 body parts', price: 750, visit_type: 'session' },
+  ],
+  hours: {},
+};
+const bookHits = new Map();
+function bookRateLimited(ip, kind, max, windowMs) {
+  const k = kind + '|' + ip, now = Date.now();
+  const arr = (bookHits.get(k) || []).filter(t => now - t < windowMs);
+  if (arr.length >= max) { bookHits.set(k, arr); return true; }
+  arr.push(now); bookHits.set(k, arr); return false;
+}
+const bookHeaders = () => ({ apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` });
+const bookClean = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n);
+
+async function getBookingSettings() {
+  let data = {};
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?id=eq.1&select=data&limit=1`, { headers: bookHeaders() });
+    const rows = await r.json();
+    if (Array.isArray(rows) && rows[0] && rows[0].data) data = rows[0].data;
+  } catch (e) { /* defaults */ }
+  return {
+    ...BOOKING_DEFAULTS, ...data,
+    types: Array.isArray(data.types) && data.types.length ? data.types : BOOKING_DEFAULTS.types,
+    hours: data.hours && typeof data.hours === 'object' ? data.hours : {},
+  };
+}
+
+function cairoWall(ms) {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(new Date(ms)).reduce((a, x) => (a[x.type] = x.value, a), {});
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
+}
+function cairoToDate(ymd, hm) {
+  const [y, m, d] = ymd.split('-').map(Number), [h, mi] = hm.split(':').map(Number);
+  const target = Date.UTC(y, m - 1, d, h, mi);
+  let ms = target;
+  for (let i = 0; i < 3; i++) ms += target - cairoWall(ms);
+  return new Date(ms);
+}
+const hmToMin = hm => { const [h, m] = hm.split(':').map(Number); return h * 60 + m; };
+const minToHm = n => String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0');
+const bookDocToken = email => crypto.createHmac('sha256', SUPABASE_SERVICE_KEY || 'x').update(String(email).toLowerCase()).digest('hex').slice(0, 12);
+
+async function bookableDoctors(settings) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/doctors?status=eq.approved&role=in.(doctor,owner)&select=email,name,color,telegram_chat_id&order=name.asc`, { headers: bookHeaders() });
+  const rows = await r.json();
+  return (Array.isArray(rows) ? rows : []).filter(d => {
+    const h = settings.hours[d.email];
+    return h && Object.values(h).some(v => Array.isArray(v) && v.length);
+  });
+}
+
+async function computeBookingSlots(settings, doc, ymd) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return [];
+  const diff = ymdDiffDays(cairoTodayYmd(), ymd);
+  if (diff < 0 || diff > settings.max_days_ahead) return [];
+  const wd = String(new Date(ymd + 'T12:00:00Z').getUTCDay());
+  const ranges = ((settings.hours[doc.email] || {})[wd]) || [];
+  if (!ranges.length) return [];
+  const step = settings.slot_minutes;
+  const dayStart = cairoToDate(ymd, '00:00');
+  const dayEnd = new Date(dayStart.getTime() + 25 * 3600000);
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/appointments?doctor_name=eq.${encodeURIComponent(doc.name)}&start_time=gte.${encodeURIComponent(dayStart.toISOString())}&start_time=lt.${encodeURIComponent(dayEnd.toISOString())}&deleted_at=is.null&select=start_time,end_time,status`, { headers: bookHeaders() });
+  const appts = await r.json();
+  const busy = (Array.isArray(appts) ? appts : []).filter(a => a.status !== 'cancelled').map(a => [new Date(a.start_time).getTime(), new Date(a.end_time || new Date(a.start_time).getTime() + 30 * 60000).getTime()]);
+  const earliest = Date.now() + settings.min_lead_hours * 3600000;
+  const out = [];
+  for (const [from, to] of ranges) {
+    for (let t = hmToMin(from); t + step <= hmToMin(to); t += step) {
+      const hm = minToHm(t);
+      const s = cairoToDate(ymd, hm).getTime(), e = s + step * 60000;
+      if (s < earliest) continue;
+      if (busy.some(([bs, be]) => s < be && e > bs)) continue;
+      if (!out.includes(hm)) out.push(hm);
+    }
+  }
+  return out.sort();
+}
+
+const bookPhoneKey = p => String(p || '').replace(/\D/g, '').slice(-10);
+async function hasActivePackageByPhone(phone) {
+  const key = bookPhoneKey(phone);
+  if (key.length < 10) return false;
+  const pr = await fetch(`${SUPABASE_URL}/rest/v1/packages?select=patient_name,total_sessions,used_sessions&order=created_at.desc&limit=2000`, { headers: bookHeaders() });
+  const pk = await pr.json();
+  const names = new Set((Array.isArray(pk) ? pk : []).filter(p => p.used_sessions < p.total_sessions).map(p => String(p.patient_name || '').trim().toLowerCase()));
+  if (!names.size) return false;
+  const ar = await fetch(`${SUPABASE_URL}/rest/v1/appointments?select=patient_name,patient_phone&patient_phone=not.is.null&deleted_at=is.null&order=start_time.desc&limit=5000`, { headers: bookHeaders() });
+  const rows = await ar.json();
+  return (Array.isArray(rows) ? rows : []).some(a => names.has(String(a.patient_name || '').trim().toLowerCase()) && bookPhoneKey(a.patient_phone) === key);
+}
+
+app.get('/api/book/config', async (req, res) => {
+  try {
+    const s = await getBookingSettings();
+    const docs = s.enabled ? await bookableDoctors(s) : [];
+    res.set('Cache-Control', 'no-store').json({
+      enabled: !!s.enabled && docs.length > 0, instapay: s.instapay, note: s.note, max_days_ahead: s.max_days_ahead,
+      types: s.types.filter(t => t.price > 0).map(t => ({ key: t.key, label: t.label, price: t.price, deposit: Math.round(t.price / 2) })),
+      doctors: docs.map(d => ({ id: bookDocToken(d.email), name: d.name })),
+    });
+  } catch (err) { res.status(500).json({ error: 'Booking is not available right now.' }); }
+});
+
+app.get('/api/book/slots', async (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (bookRateLimited(ip, 'slots', 120, 600000)) return res.status(429).json({ error: 'Too many requests. Please wait a moment.' });
+  try {
+    const s = await getBookingSettings();
+    if (!s.enabled) return res.json({ times: [] });
+    const doc = (await bookableDoctors(s)).find(d => bookDocToken(d.email) === String(req.query.doctor || ''));
+    if (!doc) return res.json({ times: [] });
+    res.set('Cache-Control', 'no-store').json({ times: await computeBookingSlots(s, doc, String(req.query.date || '')) });
+  } catch (err) { res.status(500).json({ error: 'Could not load times.' }); }
+});
+
+app.post('/api/book', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Booking is not available right now.' });
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (bookRateLimited(ip, 'book', 6, 3600000)) return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  const b = req.body || {};
+  if (b.website) return res.json({ ok: true }); // honeypot
+  try {
+    const s = await getBookingSettings();
+    if (!s.enabled) return res.status(400).json({ error: 'Online booking is closed right now.' });
+    const name = bookClean(b.name, 120), phone = bookClean(b.phone, 20).replace(/[^0-9+]/g, '');
+    if (name.length < 3 || phone.replace(/\D/g, '').length < 10) return res.status(400).json({ error: 'Please enter your full name and a valid phone number.' });
+    const type = s.types.find(t => t.key === b.type && t.price > 0);
+    const doc = (await bookableDoctors(s)).find(d => bookDocToken(d.email) === String(b.doctor || ''));
+    if (!type || !doc) return res.status(400).json({ error: 'Please choose a visit type and a doctor.' });
+    const date = String(b.date || ''), time = String(b.time || '');
+    const times = await computeBookingSlots(s, doc, date);
+    if (!/^\d{2}:\d{2}$/.test(time) || !times.includes(time)) return res.status(409).json({ error: 'Sorry, that time is no longer available. Please pick another one.' });
+
+    const pkg = await hasActivePackageByPhone(phone);
+    const deposit = pkg ? 0 : Math.round(type.price / 2);
+    let shotPath = null;
+    if (!pkg) {
+      const ext = SHOT_TYPES[String(b.shotType || '').toLowerCase()];
+      if (!ext || !b.shotBase64) return res.status(400).json({ error: 'Please upload the InstaPay transfer screenshot to confirm your booking.' });
+      const bytes = Buffer.from(String(b.shotBase64), 'base64');
+      if (bytes.length < 500 || bytes.length > SHOT_MAX_BYTES) return res.status(400).json({ error: 'The screenshot is not valid (max 4 MB).' });
+      shotPath = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}/deposit.${ext}`;
+      const up = await fetch(`${SUPABASE_URL}/storage/v1/object/${BOOKING_BUCKET}/${shotPath}`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': String(b.shotType), 'x-upsert': 'false' }, body: bytes });
+      if (!up.ok) { console.error('Deposit upload failed:', up.status, await up.text().catch(() => '')); return res.status(500).json({ error: 'Could not save the screenshot. Please try again.' }); }
+    }
+
+    const start = cairoToDate(date, time), end = new Date(start.getTime() + s.slot_minutes * 60000);
+    const noteText = pkg
+      ? 'Online booking - patient has an active package, no deposit needed.'
+      : `Online booking - deposit of ${deposit} EGP received by InstaPay (non-refundable). Deduct it from the fee. Screenshot is in Dashboard > Booking.`;
+    const ins = await fetch(`${SUPABASE_URL}/rest/v1/appointments`, {
+      method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify({
+        patient_name: name, patient_phone: phone, start_time: start.toISOString(), end_time: end.toISOString(),
+        doctor_name: doc.name, doctor_color: doc.color || null, visit_type: type.visit_type || 'session',
+        notes: [{ text: noteText, author: 'Online booking', at: new Date().toISOString() }],
+      }),
+    });
+    const created = await ins.json();
+    if (!ins.ok || !Array.isArray(created) || !created[0]) { console.error('Online booking insert failed:', ins.status, JSON.stringify(created)); return res.status(500).json({ error: 'Could not save your booking. Please try again.' }); }
+    const appt = created[0];
+
+    // Two people tapping the same slot at the same moment: the earlier one keeps it.
+    try {
+      const same = await (await fetch(`${SUPABASE_URL}/rest/v1/appointments?doctor_name=eq.${encodeURIComponent(doc.name)}&start_time=eq.${encodeURIComponent(start.toISOString())}&deleted_at=is.null&status=neq.cancelled&select=id,created_at&order=created_at.asc`, { headers: bookHeaders() })).json();
+      if (Array.isArray(same) && same.length > 1 && String(same[0].id) !== String(appt.id)) {
+        await fetch(`${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(appt.id)}`, { method: 'PATCH', headers: { ...bookHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'cancelled' }) });
+        return res.status(409).json({ error: 'Sorry, someone just took that time. Please pick another one. (Your screenshot was not used.)' });
+      }
+    } catch (e) { /* best effort */ }
+
+    await fetch(`${SUPABASE_URL}/rest/v1/booking_deposits`, {
+      method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ appointment_id: String(appt.id), patient_name: name, phone, doctor_name: doc.name, visit_label: type.label, start_time: start.toISOString(), amount: deposit, package_booking: !!pkg, screenshot_path: shotPath }),
+    }).catch(e => console.error('Deposit row insert failed:', e.message));
+
+    res.json({ ok: true, doctor: doc.name, date, time, label: type.label, deposit, package: !!pkg });
+
+    // Tell the owner(s) and the doctor on Telegram (best effort).
+    try {
+      const dateAr = new Date(date + 'T12:00:00Z').toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+      const msg = `📅 حجز أونلاين جديد\n${name} · ${phone}\n${dateAr} الساعة ${time}\nمع ${doc.name} — ${type.label}\n${pkg ? 'عنده باكدج — من غير deposit' : `Deposit ${deposit} جنيه (InstaPay) — راجع الصورة من Dashboard ← Booking`}`;
+      const owners = await (await fetch(`${SUPABASE_URL}/rest/v1/doctors?role=eq.owner&status=eq.approved&telegram_chat_id=not.is.null&select=telegram_chat_id`, { headers: bookHeaders() })).json();
+      const chats = new Set((Array.isArray(owners) ? owners : []).map(o => o.telegram_chat_id));
+      if (doc.telegram_chat_id) chats.add(doc.telegram_chat_id);
+      for (const c of chats) await telegramSend(c, msg).catch(() => {});
+    } catch (e) { /* ignore */ }
+  } catch (err) {
+    console.error('Online booking error:', err);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+// ---- Owner side ----
+app.get('/api/booking/settings', requireOwnerDoctor, async (req, res) => {
+  try {
+    const s = await getBookingSettings();
+    const dr = await (await fetch(`${SUPABASE_URL}/rest/v1/doctors?status=eq.approved&role=in.(doctor,owner)&select=email,name&order=name.asc`, { headers: bookHeaders() })).json();
+    res.json({ settings: s, doctors: Array.isArray(dr) ? dr : [] });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.put('/api/booking/settings', requireOwnerDoctor, async (req, res) => {
+  const b = req.body || {};
+  const num = (v, lo, hi, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+  const types = (Array.isArray(b.types) ? b.types : []).slice(0, 8).map((t, i) => ({
+    key: bookClean(t.key, 30).replace(/[^a-z0-9_-]/gi, '') || ('type' + (i + 1)),
+    label: bookClean(t.label, 60), price: num(t.price, 0, 100000, 0),
+    visit_type: ['session', 'checkup', 'recovery'].includes(t.visit_type) ? t.visit_type : 'session',
+  })).filter(t => t.label);
+  const hours = {};
+  for (const [email, days] of Object.entries(b.hours && typeof b.hours === 'object' ? b.hours : {})) {
+    if (typeof email !== 'string' || email.length > 120 || !days || typeof days !== 'object') continue;
+    for (const wd of ['0', '1', '2', '3', '4', '5', '6']) {
+      const ranges = (Array.isArray(days[wd]) ? days[wd] : []).slice(0, 3)
+        .filter(r => Array.isArray(r) && /^\d{2}:\d{2}$/.test(r[0]) && /^\d{2}:\d{2}$/.test(r[1]) && hmToMin(r[0]) < hmToMin(r[1]))
+        .map(r => [r[0], r[1]]);
+      if (ranges.length) { (hours[email] = hours[email] || {})[wd] = ranges; }
+    }
+  }
+  const data = { enabled: !!b.enabled, instapay: bookClean(b.instapay, 200), note: bookClean(b.note, 600), slot_minutes: num(b.slot_minutes, 15, 120, 30), min_lead_hours: num(b.min_lead_hours, 0, 72, 2), max_days_ahead: num(b.max_days_ahead, 1, 90, 30), types, hours };
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?on_conflict=id`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ id: 1, data, updated_at: new Date().toISOString() }) });
+    if (!r.ok) { console.error('booking_settings save failed', r.status, await r.text().catch(() => '')); return res.status(500).json({ error: 'Could not save. Did you run the booking SQL?' }); }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.get('/api/booking/deposits', requireOwnerDoctor, async (req, res) => {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_deposits?order=created_at.desc&limit=150`, { headers: bookHeaders() });
+    const rows = await r.json();
+    if (!r.ok) return res.status(500).json({ error: 'Could not load. Did you run the booking SQL?' });
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.get('/api/booking/deposits/:id/shot', requireOwnerDoctor, async (req, res) => {
+  try {
+    const rows = await (await fetch(`${SUPABASE_URL}/rest/v1/booking_deposits?id=eq.${encodeURIComponent(req.params.id)}&select=screenshot_path&limit=1`, { headers: bookHeaders() })).json();
+    const p = rows && rows[0] && rows[0].screenshot_path;
+    if (!p) return res.status(404).json({ error: 'No screenshot.' });
+    const s = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${BOOKING_BUCKET}/${p}`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ expiresIn: 600 }) });
+    const j = await s.json();
+    if (!s.ok || !j.signedURL) return res.status(500).json({ error: 'Could not open the screenshot.' });
+    res.json({ url: `${SUPABASE_URL}/storage/v1${j.signedURL}` });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.post('/api/booking/deposits/:id/review', requireOwnerDoctor, async (req, res) => {
+  const status = req.body && req.body.status;
+  if (!['ok', 'rejected'].includes(status)) return res.status(400).json({ error: 'Bad status.' });
+  try {
+    const rows = await (await fetch(`${SUPABASE_URL}/rest/v1/booking_deposits?id=eq.${encodeURIComponent(req.params.id)}&select=appointment_id&limit=1`, { headers: bookHeaders() })).json();
+    const row = Array.isArray(rows) && rows[0];
+    if (!row) return res.status(404).json({ error: 'Not found.' });
+    await fetch(`${SUPABASE_URL}/rest/v1/booking_deposits?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'PATCH', headers: { ...bookHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ status, reviewed_at: new Date().toISOString() }) });
+    if (status === 'rejected' && row.appointment_id) {
+      await fetch(`${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(row.appointment_id)}`, { method: 'PATCH', headers: { ...bookHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'cancelled' }) });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+const BOOK_PAGE = String.raw`<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Book an appointment - Empower</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f6f4ee;color:#12363a;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;padding:16px}
+.c{max-width:560px;margin:12px auto;background:#fff;border:1px solid #e4dfd0;border-radius:14px;padding:22px}
+.logo{display:block;max-width:240px;width:70%;margin:0 auto 14px}h1{font-size:1.25rem;margin:0 0 4px;text-align:center}.sub{font-size:.85rem;color:#5b6863;text-align:center;margin-bottom:16px}
+label{display:block;font-size:.82rem;font-weight:700;margin:14px 0 5px}input,select{width:100%;padding:11px;border:1px solid #d8d3c3;border-radius:9px;font-size:1rem;background:#fff}
+.slots{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}.slot{padding:9px 14px;border:1px solid #12363a;border-radius:999px;background:#fff;color:#12363a;font-size:.9rem;cursor:pointer}.slot.on{background:#12363a;color:#fff}
+.box{background:#fbf6e8;border:1px solid #ecd9a6;border-radius:10px;padding:12px;font-size:.86rem;line-height:1.5;margin-top:14px}
+button.go{width:100%;margin-top:18px;padding:14px;border:0;border-radius:10px;background:#12363a;color:#fff;font-size:1rem;font-weight:700;cursor:pointer}button.go:disabled{opacity:.5}
+.err{color:#b3261e;font-size:.85rem;margin-top:10px;min-height:1em}.hp{position:absolute;left:-9999px}.ok{text-align:center}.ok h1{color:#1b7a4a}
+#prev{max-width:100%;max-height:220px;margin-top:8px;border-radius:8px;display:none}.muted{color:#6a756f;font-size:.8rem}
+</style></head><body><div class="c" id="card"><img class="logo" src="/clinic-logo.png" alt="Empower"><h1>Book an appointment</h1><div class="sub" id="sub">Loading…</div><div id="form" style="display:none">
+<input class="hp" id="website" tabindex="-1" autocomplete="off">
+<label>Full name</label><input id="name" autocomplete="name">
+<label>Phone number (WhatsApp)</label><input id="phone" type="tel" inputmode="tel" autocomplete="tel">
+<label>Visit type</label><select id="type"></select>
+<label>Doctor</label><select id="doctor"></select>
+<label>Date</label><input id="date" type="date">
+<label>Available times</label><div class="slots" id="slots"><span class="muted">Choose a doctor and a date.</span></div>
+<div class="box" id="depositBox"></div>
+<div id="shotWrap"><label>InstaPay transfer screenshot</label><input id="shot" type="file" accept="image/*"><img id="prev" alt=""></div>
+<div class="err" id="err"></div>
+<button class="go" id="go">Confirm booking</button></div></div>
+<script>
+var cfg=null,chosenTime='',shotData=null,shotType='';
+function $(i){return document.getElementById(i)}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function ymd(d){var m=d.getMonth()+1,dd=d.getDate();return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(dd<10?'0':'')+dd}
+function typeObj(){return cfg.types.filter(function(t){return t.key===$('type').value})[0]}
+function depositText(){var t=typeObj();if(!t)return;
+$('depositBox').innerHTML='<b>Deposit: '+t.deposit+' EGP</b> (half of the '+t.price+' EGP fee). The deposit is <b>non-refundable</b> and is deducted from your fee at the clinic.<br><br>'+(cfg.instapay?'Transfer it by InstaPay to: <b>'+esc(cfg.instapay)+'</b><br>':'')+(cfg.note?esc(cfg.note)+'<br>':'')+'Then upload the screenshot below to confirm your booking.<br><span class="muted">Already have an active package with us? Leave the screenshot empty - no deposit is needed.</span>'}
+function loadSlots(){chosenTime='';var d=$('doctor').value,dt=$('date').value;if(!d||!dt){$('slots').innerHTML='<span class="muted">Choose a doctor and a date.</span>';return}
+$('slots').innerHTML='<span class="muted">Loading…</span>';
+fetch('/api/book/slots?doctor='+encodeURIComponent(d)+'&date='+dt).then(function(r){return r.json()}).then(function(j){
+if(!j.times||!j.times.length){$('slots').innerHTML='<span class="muted">No available times that day. Try another date.</span>';return}
+$('slots').innerHTML=j.times.map(function(t){return '<button type="button" class="slot" data-t="'+t+'">'+t+'</button>'}).join('');
+Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(b){b.onclick=function(){chosenTime=b.dataset.t;Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(x){x.classList.toggle('on',x===b)})}})
+}).catch(function(){$('slots').innerHTML='<span class="muted">Could not load times.</span>'})}
+function init(){fetch('/api/book/config').then(function(r){return r.json()}).then(function(c){cfg=c;
+if(!c.enabled){$('sub').textContent='Online booking is not open right now. Please contact the clinic on WhatsApp.';return}
+$('sub').textContent='Choose your visit, doctor and time.';$('form').style.display='block';
+$('type').innerHTML=c.types.map(function(t){return '<option value="'+esc(t.key)+'">'+esc(t.label)+' - '+t.price+' EGP</option>'}).join('');
+$('doctor').innerHTML='<option value="">Choose a doctor…</option>'+c.doctors.map(function(d){return '<option value="'+esc(d.id)+'">Dr. '+esc(d.name)+'</option>'}).join('');
+var now=new Date(),max=new Date(now.getTime()+c.max_days_ahead*86400000);$('date').min=ymd(now);$('date').max=ymd(max);
+depositText();$('type').onchange=depositText;$('doctor').onchange=loadSlots;$('date').onchange=loadSlots;
+}).catch(function(){$('sub').textContent='Booking is not available right now.'})}
+$('shot').onchange=function(){var f=this.files[0];shotData=null;$('prev').style.display='none';if(!f)return;
+var img=new Image(),url=URL.createObjectURL(f);img.onload=function(){var s=Math.min(1,1400/Math.max(img.width,img.height)),cv=document.createElement('canvas');cv.width=Math.round(img.width*s);cv.height=Math.round(img.height*s);cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
+var u=cv.toDataURL('image/jpeg',0.82);shotData=u.split(',')[1];shotType='image/jpeg';$('prev').src=u;$('prev').style.display='block';URL.revokeObjectURL(url)};
+img.onerror=function(){$('err').textContent='Please choose an image file.'};img.src=url};
+$('go').onclick=function(){$('err').textContent='';
+if($('name').value.trim().length<3)return $('err').textContent='Please enter your full name.';
+if($('phone').value.replace(/\D/g,'').length<10)return $('err').textContent='Please enter a valid phone number.';
+if(!$('doctor').value)return $('err').textContent='Please choose a doctor.';
+if(!$('date').value||!chosenTime)return $('err').textContent='Please choose a date and a time.';
+$('go').disabled=true;$('go').textContent='Booking…';
+fetch('/api/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('name').value,phone:$('phone').value,type:$('type').value,doctor:$('doctor').value,date:$('date').value,time:chosenTime,shotBase64:shotData,shotType:shotType,website:$('website').value})})
+.then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
+if(!x.ok){$('err').textContent=x.j.error||'Something went wrong.';$('go').disabled=false;$('go').textContent='Confirm booking';if(/no longer|just took/.test(x.j.error||''))loadSlots();return}
+var j=x.j;$('card').innerHTML='<div class="ok"><img class="logo" src="/clinic-logo.png" alt="Empower"><h1>Your booking is confirmed ✓</h1><p><b>Dr. '+esc(j.doctor)+'</b><br>'+esc(j.date)+' at '+esc(j.time)+'<br>'+esc(j.label)+'</p>'+(j.package?'<p class="muted">Your active package covers this visit.</p>':'<p class="muted">Deposit received: '+j.deposit+' EGP (non-refundable, deducted from your fee).</p>')+'<div class="box" style="text-align:left">📍 92 Sayed El-Merghany St., El-Montaza, Heliopolis, Cairo<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">Open the location on the map</a><br><br>Please arrive 5 minutes early. To change the time, contact the clinic on WhatsApp at least 5 hours before.</div></div>'
+}).catch(function(){$('err').textContent='Connection problem. Please try again.';$('go').disabled=false;$('go').textContent='Confirm booking'})};
+init();
+</script></body></html>`;
+app.get('/book', (req, res) => {
+  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(BOOK_PAGE);
+});
+
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
