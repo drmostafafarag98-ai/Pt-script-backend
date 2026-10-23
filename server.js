@@ -123,6 +123,34 @@ function extractBearerToken(req) {
   return match ? match[1] : null;
 }
 
+
+// ---- Login activity log (owner can see who opened/signed in, from which device) ----
+const loginLogSeen = new Map();
+function logDevice(ua) {
+  ua = String(ua || '');
+  const os = /Android/i.test(ua) ? 'Android' : /iPhone|iPad|iOS/i.test(ua) ? 'iPhone/iPad' : /Windows/i.test(ua) ? 'Windows' : /Mac OS/i.test(ua) ? 'Mac' : /Linux/i.test(ua) ? 'Linux' : 'Other';
+  const br = /; wv\)|Version\/[\d.]+ Chrome/i.test(ua) ? 'WebView/App' : /Edg\//i.test(ua) ? 'Edge' : /Firefox/i.test(ua) ? 'Firefox' : /Chrome/i.test(ua) ? 'Chrome' : /Safari/i.test(ua) ? 'Safari' : 'Other';
+  return os + ' · ' + br;
+}
+function logActivity(req, event, email, extra) {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+    const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    if (event === 'open' || event === 'page') {
+      const k = event + '|' + (email || '') + '|' + ip + '|' + (extra || '');
+      const now = Date.now();
+      if (now - (loginLogSeen.get(k) || 0) < 30 * 60000) return;
+      loginLogSeen.set(k, now);
+      if (loginLogSeen.size > 5000) loginLogSeen.clear();
+    }
+    fetch(`${SUPABASE_URL}/rest/v1/login_log`, {
+      method: 'POST',
+      headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ event, email: email ? String(email).slice(0, 160) : null, ip: ip.slice(0, 60), device: logDevice(req.headers['user-agent']), detail: extra ? String(extra).slice(0, 80) : null }),
+    }).catch(() => {});
+  } catch (e) { /* never break the request */ }
+}
+
 async function requireApprovedDoctor(req, res, next) {
   const token = extractBearerToken(req);
   const email = await verifyGoogleToken(token);
@@ -2912,6 +2940,7 @@ app.post('/api/doctors/checkin', async (req, res) => {
   const email = existingSession ? existingSession.email : await verifyGoogleToken(token);
   if (!email) return res.status(401).json({ error: 'Invalid or expired Google token.' });
   const newSessionToken = existingSession ? null : await createAppSession(email);
+  logActivity(req, existingSession ? 'open' : 'google', email);
   const { name } = req.body || {};
   try {
     const existing = await lookupDoctor(email);
@@ -3172,8 +3201,10 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const doctor = await lookupDoctor(email.trim().toLowerCase());
     if (!doctor || !doctor.password_hash || !verifyPassword(password, doctor.password_hash)) {
+      logActivity(req, 'failed', email.trim().toLowerCase(), 'wrong password');
       return res.status(401).json({ error: 'Wrong email or password.' });
     }
+    logActivity(req, 'login', doctor.email);
     const sessionToken = await createAppSession(doctor.email);
     const { password_hash, ...safeDoctor } = doctor;
     res.json({ ...safeDoctor, session_token: sessionToken });
@@ -3797,6 +3828,7 @@ button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;m
 </script></body></html>`;
 
 app.get('/apply', (req, res) => {
+  logActivity(req, 'page', null, 'apply');
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(APPLY_PAGE);
 });
 
@@ -4320,6 +4352,14 @@ app.put('/api/booking/settings', requireOwnerDoctor, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
+app.get('/api/login-log', requireOwnerDoctor, async (req, res) => {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/login_log?order=created_at.desc&limit=300`, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const rows = await r.json();
+    if (!r.ok) return res.status(500).json({ error: 'Could not load. Did you run the login log SQL?' });
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
 app.get('/api/booking/leads', requireOwnerDoctor, async (req, res) => {
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_leads?completed=eq.false&order=last_seen.desc&limit=100`, { headers: bookHeaders() });
@@ -4445,6 +4485,7 @@ var j=x.j;$('card').innerHTML='<div class="ok"><img class="logo" src="/clinic-lo
 init();
 </script></body></html>`;
 app.get('/book', (req, res) => {
+  logActivity(req, 'page', null, 'book');
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(BOOK_PAGE);
 });
 
