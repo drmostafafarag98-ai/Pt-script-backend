@@ -4159,6 +4159,8 @@ app.get('/api/book/config', async (req, res) => {
   try {
     const s = await getBookingSettings();
     const docs = s.enabled ? await bookableDoctors(s) : [];
+    const gotInfo = bookClean(req.query.name, 120).length >= 3 && String(req.query.phone || '').replace(/\D/g, '').length >= 10;
+    if (!gotInfo) return res.set('Cache-Control', 'no-store').json({ enabled: !!s.enabled && docs.length > 0, locked: true });
     res.set('Cache-Control', 'no-store').json({
       enabled: !!s.enabled && docs.length > 0, instapay: s.instapay, note: s.note, max_days_ahead: s.max_days_ahead,
       types: s.types.filter(t => t.price > 0).map(t => ({ key: t.key, label: t.label, price: t.price, deposit: Math.round(t.price / 2) })),
@@ -4171,6 +4173,7 @@ app.get('/api/book/slots', async (req, res) => {
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
   if (bookRateLimited(ip, 'slots', 120, 600000)) return res.status(429).json({ error: 'Too many requests. Please wait a moment.' });
   try {
+    if (String(req.query.phone || '').replace(/\D/g, '').length < 10) return res.json({ times: [] });
     const s = await getBookingSettings();
     if (!s.enabled) return res.json({ times: [] });
     const doc = (await bookableDoctors(s)).find(d => bookDocToken(d.email) === String(req.query.doctor || ''));
@@ -4339,10 +4342,13 @@ label{display:block;font-size:.82rem;font-weight:700;margin:14px 0 5px}input,sel
 button.go{width:100%;margin-top:18px;padding:14px;border:0;border-radius:10px;background:#12363a;color:#fff;font-size:1rem;font-weight:700;cursor:pointer}button.go:disabled{opacity:.5}
 .err{color:#b3261e;font-size:.85rem;margin-top:10px;min-height:1em}.hp{position:absolute;left:-9999px}.ok{text-align:center}.ok h1{color:#1b7a4a}
 #prev{max-width:100%;max-height:220px;margin-top:8px;border-radius:8px;display:none}.muted{color:#6a756f;font-size:.8rem}
-</style></head><body><div class="c" id="card"><img class="logo" src="/clinic-logo.png" alt="Empower"><h1>Book an appointment</h1><div class="sub" id="sub">Loading…</div><div id="form" style="display:none">
+</style></head><body><div class="c" id="card"><img class="logo" src="/clinic-logo.png" alt="Empower"><h1>Book an appointment</h1><div class="sub" id="sub">Loading…</div><div id="step1" style="display:none">
 <input class="hp" id="website" tabindex="-1" autocomplete="off">
 <label>Full name</label><input id="name" autocomplete="name">
 <label>Phone number (WhatsApp)</label><input id="phone" type="tel" inputmode="tel" autocomplete="tel">
+<div class="err" id="err1"></div>
+<button class="go" id="next">Continue</button></div>
+<div id="form" style="display:none">
 <label>Visit type</label><select id="type"></select>
 <label>Doctor</label><select id="doctor"></select>
 <label>Date</label><input id="date" type="date">
@@ -4361,26 +4367,33 @@ function depositText(){var t=typeObj();if(!t)return;
 $('depositBox').innerHTML='<b>Deposit: '+t.deposit+' EGP</b> (half of the '+t.price+' EGP fee). The deposit is <b>non-refundable</b> and is deducted from your fee at the clinic.<br><br>'+(cfg.instapay?'Transfer it by InstaPay to: <b>'+esc(cfg.instapay)+'</b><br>':'')+(cfg.note?esc(cfg.note)+'<br>':'')+'Then upload the screenshot below to confirm your booking.<br><span class="muted">Already have an active package with us? Leave the screenshot empty - no deposit is needed.</span>'}
 function loadSlots(){chosenTime='';var d=$('doctor').value,dt=$('date').value;if(!d||!dt){$('slots').innerHTML='<span class="muted">Choose a doctor and a date.</span>';return}
 $('slots').innerHTML='<span class="muted">Loading…</span>';
-fetch('/api/book/slots?doctor='+encodeURIComponent(d)+'&date='+dt).then(function(r){return r.json()}).then(function(j){
+fetch('/api/book/slots?doctor='+encodeURIComponent(d)+'&date='+dt+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(j){
 if(!j.times||!j.times.length){$('slots').innerHTML='<span class="muted">No available times that day. Try another date.</span>';return}
 $('slots').innerHTML=j.times.map(function(t){return '<button type="button" class="slot" data-t="'+t+'">'+t+'</button>'}).join('');
 Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(b){b.onclick=function(){chosenTime=b.dataset.t;Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(x){x.classList.toggle('on',x===b)})}})
 }).catch(function(){$('slots').innerHTML='<span class="muted">Could not load times.</span>'})}
-function init(){fetch('/api/book/config').then(function(r){return r.json()}).then(function(c){cfg=c;
+function init(){fetch('/api/book/config').then(function(r){return r.json()}).then(function(c){
 if(!c.enabled){$('sub').textContent='Online booking is not open right now. Please contact the clinic on WhatsApp.';return}
+$('sub').textContent='Enter your name and phone number to start.';$('step1').style.display='block'
+}).catch(function(){$('sub').textContent='Booking is not available right now.'})}
+$('next').onclick=function(){$('err1').textContent='';
+if($('name').value.trim().length<3)return $('err1').textContent='Please enter your full name.';
+if($('phone').value.replace(/\D/g,'').length<10)return $('err1').textContent='Please enter a valid phone number.';
+$('next').disabled=true;
+fetch('/api/book/config?name='+encodeURIComponent($('name').value.trim())+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(c){cfg=c;
+if(!c.enabled||c.locked){$('err1').textContent='Booking is not available right now.';$('next').disabled=false;return}
+$('name').readOnly=true;$('phone').readOnly=true;$('next').style.display='none';
 $('sub').textContent='Choose your visit, doctor and time.';$('form').style.display='block';
 $('type').innerHTML=c.types.map(function(t){return '<option value="'+esc(t.key)+'">'+esc(t.label)+' - '+t.price+' EGP</option>'}).join('');
 $('doctor').innerHTML='<option value="">Choose a doctor…</option>'+c.doctors.map(function(d){return '<option value="'+esc(d.id)+'">Dr. '+esc(d.name)+'</option>'}).join('');
 var now=new Date(),max=new Date(now.getTime()+c.max_days_ahead*86400000);$('date').min=ymd(now);$('date').max=ymd(max);
 depositText();$('type').onchange=depositText;$('doctor').onchange=loadSlots;$('date').onchange=loadSlots;
-}).catch(function(){$('sub').textContent='Booking is not available right now.'})}
+}).catch(function(){$('err1').textContent='Connection problem. Please try again.';$('next').disabled=false})}
 $('shot').onchange=function(){var f=this.files[0];shotData=null;$('prev').style.display='none';if(!f)return;
 var img=new Image(),url=URL.createObjectURL(f);img.onload=function(){var s=Math.min(1,1400/Math.max(img.width,img.height)),cv=document.createElement('canvas');cv.width=Math.round(img.width*s);cv.height=Math.round(img.height*s);cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
 var u=cv.toDataURL('image/jpeg',0.82);shotData=u.split(',')[1];shotType='image/jpeg';$('prev').src=u;$('prev').style.display='block';URL.revokeObjectURL(url)};
 img.onerror=function(){$('err').textContent='Please choose an image file.'};img.src=url};
 $('go').onclick=function(){$('err').textContent='';
-if($('name').value.trim().length<3)return $('err').textContent='Please enter your full name.';
-if($('phone').value.replace(/\D/g,'').length<10)return $('err').textContent='Please enter a valid phone number.';
 if(!$('doctor').value)return $('err').textContent='Please choose a doctor.';
 if(!$('date').value||!chosenTime)return $('err').textContent='Please choose a date and a time.';
 $('go').disabled=true;$('go').textContent='Booking…';
