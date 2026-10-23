@@ -4161,6 +4161,15 @@ app.get('/api/book/config', async (req, res) => {
     const docs = s.enabled ? await bookableDoctors(s) : [];
     const gotInfo = bookClean(req.query.name, 120).length >= 3 && String(req.query.phone || '').replace(/\D/g, '').length >= 10;
     if (!gotInfo) return res.set('Cache-Control', 'no-store').json({ enabled: !!s.enabled && docs.length > 0, locked: true });
+    if (s.enabled && docs.length) {
+      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+      if (!bookRateLimited(ip, 'lead', 15, 3600000)) {
+        fetch(`${SUPABASE_URL}/rest/v1/booking_leads?on_conflict=phone_key`, {
+          method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: JSON.stringify({ phone_key: bookPhoneKey(req.query.phone), name: bookClean(req.query.name, 120), phone: bookClean(req.query.phone, 20).replace(/[^0-9+]/g, ''), last_seen: new Date().toISOString() }),
+        }).catch(() => {});
+      }
+    }
     res.set('Cache-Control', 'no-store').json({
       enabled: !!s.enabled && docs.length > 0, instapay: s.instapay, note: s.note, max_days_ahead: s.max_days_ahead,
       types: s.types.filter(t => t.price > 0).map(t => ({ key: t.key, label: t.label, price: t.price, deposit: Math.round(t.price / 2) })),
@@ -4243,6 +4252,7 @@ app.post('/api/book', async (req, res) => {
       body: JSON.stringify({ appointment_id: String(appt.id), patient_name: name, phone, doctor_name: doc.name, visit_label: type.label, start_time: start.toISOString(), amount: deposit, package_booking: !!pkg, screenshot_path: shotPath }),
     }).catch(e => console.error('Deposit row insert failed:', e.message));
 
+    fetch(`${SUPABASE_URL}/rest/v1/booking_leads?phone_key=eq.${bookPhoneKey(phone)}`, { method: 'PATCH', headers: { ...bookHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ completed: true }) }).catch(() => {});
     res.json({ ok: true, doctor: doc.name, date, time, label: type.label, deposit, package: !!pkg });
 
     // Tell the owner(s) and the doctor on Telegram (best effort).
@@ -4291,6 +4301,21 @@ app.put('/api/booking/settings', requireOwnerDoctor, async (req, res) => {
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?on_conflict=id`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ id: 1, data, updated_at: new Date().toISOString() }) });
     if (!r.ok) { console.error('booking_settings save failed', r.status, await r.text().catch(() => '')); return res.status(500).json({ error: 'Could not save. Did you run the booking SQL?' }); }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+app.get('/api/booking/leads', requireOwnerDoctor, async (req, res) => {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_leads?completed=eq.false&order=last_seen.desc&limit=100`, { headers: bookHeaders() });
+    const rows = await r.json();
+    if (!r.ok) return res.status(500).json({ error: 'Could not load. Did you run the leads SQL?' });
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+app.delete('/api/booking/leads/:id', requireOwnerDoctor, async (req, res) => {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/booking_leads?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'DELETE', headers: bookHeaders() });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
