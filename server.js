@@ -3853,6 +3853,16 @@ app.patch('/api/applicants/:id', requireOwnerOrPermission('view_applicants'), as
   if (b.status !== undefined) { if (!['new', 'shortlisted', 'interview', 'accepted', 'rejected'].includes(b.status)) return res.status(400).json({ error: 'Bad status.' }); patch.status = b.status; }
   if (b.rating !== undefined) { const n = b.rating === null ? null : parseInt(b.rating, 10); if (n !== null && !(n >= 1 && n <= 5)) return res.status(400).json({ error: 'Bad rating.' }); patch.rating = n; }
   if (b.owner_notes !== undefined) patch.owner_notes = String(b.owner_notes || '').slice(0, 2000);
+  if (b.train_slot !== undefined) {
+    if (b.train_slot === null || b.train_slot === '') { patch.train_start = null; patch.train_end = null; patch.train_shift = null; patch.confirm_sent_at = null; patch.remind_for = null; }
+    else {
+      const m = /^(\d{4}-\d{2}-\d{2})\|(\d{4}-\d{2}-\d{2})\|(morning|evening)$/.exec(String(b.train_slot));
+      if (!m) return res.status(400).json({ error: 'Bad slot.' });
+      patch.train_start = m[1]; patch.train_end = m[2]; patch.train_shift = m[3];
+    }
+  }
+  if (b.confirm_sent === true) patch.confirm_sent_at = new Date().toISOString();
+  if (b.remind_for !== undefined) { if (b.remind_for !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(b.remind_for))) return res.status(400).json({ error: 'Bad date.' }); patch.remind_for = b.remind_for; }
   if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to update.' });
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/training_applicants?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'PATCH', headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
