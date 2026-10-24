@@ -4107,11 +4107,14 @@ const SHOT_MAX_BYTES = 4 * 1024 * 1024;
 const BOOKING_DEFAULTS = {
   enabled: false, instapay: '', note: '', slot_minutes: 30, min_lead_hours: 2, max_days_ahead: 30,
   types: [
-    { key: 'checkup', label: 'Check-up', price: 0, visit_type: 'checkup' },
-    { key: 'session1', label: 'Session - 1 body part', price: 500, visit_type: 'session' },
-    { key: 'session2', label: 'Session - 2 body parts', price: 750, visit_type: 'session' },
+    { key: 'checkup', label: 'Check-up', label_ar: 'Check-up — كشف (جلسة تقييمية)', price: 0, visit_type: 'checkup' },
+    { key: 'session1', label: 'Session - 1 body part', label_ar: 'جلسة — على مكان واحد (عضو واحد)', price: 500, visit_type: 'session' },
+    { key: 'session2', label: 'Session - 2 body parts', label_ar: 'جلسة — على أكتر من مكان (عضوين)', price: 750, visit_type: 'session' },
+    { key: 'recovery_half', label: 'Recovery - Half Body', label_ar: 'Recovery - Half Body', price: 900, visit_type: 'recovery' },
+    { key: 'recovery_full', label: 'Recovery - Full Body', label_ar: 'Recovery - Full Body', price: 1500, visit_type: 'recovery' },
   ],
   hours: {},
+  docs: {},
 };
 const bookHits = new Map();
 function bookRateLimited(ip, kind, max, windowMs) {
@@ -4134,6 +4137,7 @@ async function getBookingSettings() {
     ...BOOKING_DEFAULTS, ...data,
     types: Array.isArray(data.types) && data.types.length ? data.types : BOOKING_DEFAULTS.types,
     hours: data.hours && typeof data.hours === 'object' ? data.hours : {},
+    docs: data.docs && typeof data.docs === 'object' ? data.docs : {},
   };
 }
 
@@ -4189,6 +4193,8 @@ async function computeBookingSlots(settings, doc, ymd) {
   return out.sort();
 }
 
+const bookRule = (settings, email) => (settings.docs && settings.docs[email]) || {};
+const bookBlockedByGender = (settings, email, gender) => bookRule(settings, email).gender === 'female' && gender === 'male';
 const bookPhoneKey = p => String(p || '').replace(/\D/g, '').slice(-10);
 async function hasActivePackageByPhone(phone) {
   const key = bookPhoneKey(phone);
@@ -4206,7 +4212,8 @@ app.get('/api/book/config', async (req, res) => {
   try {
     const s = await getBookingSettings();
     const docs = s.enabled ? await bookableDoctors(s) : [];
-    const gotInfo = bookClean(req.query.name, 120).length >= 3 && String(req.query.phone || '').replace(/\D/g, '').length >= 10;
+    const pg = ['male', 'female'].includes(String(req.query.gender || '')) ? String(req.query.gender) : '';
+    const gotInfo = !!pg && bookClean(req.query.name, 120).length >= 3 && String(req.query.phone || '').replace(/\D/g, '').length >= 10;
     if (!gotInfo) return res.set('Cache-Control', 'no-store').json({ enabled: !!s.enabled && docs.length > 0, locked: true });
     if (s.enabled && docs.length) {
       const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
@@ -4219,8 +4226,8 @@ app.get('/api/book/config', async (req, res) => {
     }
     res.set('Cache-Control', 'no-store').json({
       enabled: !!s.enabled && docs.length > 0, instapay: s.instapay, note: s.note, max_days_ahead: s.max_days_ahead,
-      types: s.types.filter(t => t.price > 0).map(t => ({ key: t.key, label: t.label, price: t.price, deposit: Math.round(t.price / 2) })),
-      doctors: docs.map(d => ({ id: bookDocToken(d.email), name: d.name })),
+      types: s.types.filter(t => t.price > 0).map(t => ({ key: t.key, label: t.label, label_ar: t.label_ar || '', visit_type: t.visit_type || 'session', price: t.price, deposit: Math.round(t.price / 2) })),
+      doctors: docs.filter(d => !bookBlockedByGender(s, d.email, pg)).map(d => ({ id: bookDocToken(d.email), name: d.name, checkups: bookRule(s, d.email).checkups !== false })),
     });
   } catch (err) { res.status(500).json({ error: 'Booking is not available right now.' }); }
 });
@@ -4233,7 +4240,7 @@ app.get('/api/book/slots', async (req, res) => {
     const s = await getBookingSettings();
     if (!s.enabled) return res.json({ times: [] });
     const doc = (await bookableDoctors(s)).find(d => bookDocToken(d.email) === String(req.query.doctor || ''));
-    if (!doc) return res.json({ times: [] });
+    if (!doc || bookBlockedByGender(s, doc.email, String(req.query.gender || ''))) return res.json({ times: [] });
     res.set('Cache-Control', 'no-store').json({ times: await computeBookingSlots(s, doc, String(req.query.date || '')) });
   } catch (err) { res.status(500).json({ error: 'Could not load times.' }); }
 });
@@ -4252,6 +4259,10 @@ app.post('/api/book', async (req, res) => {
     const type = s.types.find(t => t.key === b.type && t.price > 0);
     const doc = (await bookableDoctors(s)).find(d => bookDocToken(d.email) === String(b.doctor || ''));
     if (!type || !doc) return res.status(400).json({ error: 'Please choose a visit type and a doctor.' });
+    const gender = ['male', 'female'].includes(String(b.gender || '')) ? String(b.gender) : '';
+    if (!gender) return res.status(400).json({ error: 'Please choose your gender.' });
+    if (bookBlockedByGender(s, doc.email, gender)) return res.status(400).json({ error: 'This doctor is not available for your booking. Please choose another doctor.' });
+    if (type.visit_type === 'checkup' && bookRule(s, doc.email).checkups === false) return res.status(400).json({ error: 'This doctor does not take check-ups. Please choose another doctor.' });
     const date = String(b.date || ''), time = String(b.time || '');
     const times = await computeBookingSlots(s, doc, date);
     if (!/^\d{2}:\d{2}$/.test(time) || !times.includes(time)) return res.status(409).json({ error: 'Sorry, that time is no longer available. Please pick another one.' });
@@ -4331,7 +4342,7 @@ app.put('/api/booking/settings', requireOwnerDoctor, async (req, res) => {
   const num = (v, lo, hi, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
   const types = (Array.isArray(b.types) ? b.types : []).slice(0, 8).map((t, i) => ({
     key: bookClean(t.key, 30).replace(/[^a-z0-9_-]/gi, '') || ('type' + (i + 1)),
-    label: bookClean(t.label, 60), price: num(t.price, 0, 100000, 0),
+    label: bookClean(t.label, 60), label_ar: bookClean(t.label_ar, 90), price: num(t.price, 0, 100000, 0),
     visit_type: ['session', 'checkup', 'recovery'].includes(t.visit_type) ? t.visit_type : 'session',
   })).filter(t => t.label);
   const hours = {};
@@ -4344,7 +4355,12 @@ app.put('/api/booking/settings', requireOwnerDoctor, async (req, res) => {
       if (ranges.length) { (hours[email] = hours[email] || {})[wd] = ranges; }
     }
   }
-  const data = { enabled: !!b.enabled, instapay: bookClean(b.instapay, 200), note: bookClean(b.note, 600), slot_minutes: num(b.slot_minutes, 15, 120, 30), min_lead_hours: num(b.min_lead_hours, 0, 72, 2), max_days_ahead: num(b.max_days_ahead, 1, 90, 30), types, hours };
+  const docsRules = {};
+  for (const [email, r] of Object.entries(b.docs && typeof b.docs === 'object' ? b.docs : {})) {
+    if (typeof email !== 'string' || email.length > 120 || !r || typeof r !== 'object') continue;
+    docsRules[email] = { gender: ['male', 'female'].includes(r.gender) ? r.gender : '', checkups: r.checkups !== false };
+  }
+  const data = { enabled: !!b.enabled, docs: docsRules, instapay: bookClean(b.instapay, 200), note: bookClean(b.note, 600), slot_minutes: num(b.slot_minutes, 15, 120, 30), min_lead_hours: num(b.min_lead_hours, 0, 72, 2), max_days_ahead: num(b.max_days_ahead, 1, 90, 30), types, hours };
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?on_conflict=id`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ id: 1, data, updated_at: new Date().toISOString() }) });
     if (!r.ok) { console.error('booking_settings save failed', r.status, await r.text().catch(() => '')); return res.status(500).json({ error: 'Could not save. Did you run the booking SQL?' }); }
@@ -4472,6 +4488,7 @@ a{color:var(--gold);font-weight:600}
 <input class="hp" id="website" tabindex="-1" autocomplete="off">
 <label id="lName"></label><input type="text" id="name" autocomplete="name">
 <label id="lPhone"></label><input type="tel" id="phone" inputmode="tel" autocomplete="tel" dir="ltr" style="text-align:start">
+<label id="lGender"></label><div class="chips" id="genderBox"><button type="button" class="chip" data-g="male" id="gMale"></button><button type="button" class="chip" data-g="female" id="gFemale"></button></div>
 <div class="err" id="err1"></div></div>
 <button class="go" id="next"></button></div>
 
@@ -4487,17 +4504,18 @@ a{color:var(--gold);font-weight:600}
 <button class="go" id="go"></button></div>
 </div>
 <script>
-var cfg=null,chosenTime='',chosenType='',chosenDoc='',shotData=null,shotType='',lang='ar';
+var gender='',cfg=null,chosenTime='',chosenType='',chosenDoc='',shotData=null,shotType='',lang='ar';
 try{lang=localStorage.getItem('bl')||((navigator.language||'').toLowerCase().indexOf('en')===0?'en':'ar')}catch(e){}
 var T={
- en:{title:'Book an appointment',sub0:'Loading…',subClosed:'Online booking is not open right now. Please contact the clinic on WhatsApp.',sub1:'Enter your details to start.',sub2:'Choose your visit, doctor and time.',lName:'Full name',lPhone:'Phone number (WhatsApp)',next:'Continue',hType:'1. Visit type',hDoc:'2. Doctor & time',lDate:'Day',lOther:'Or pick another date',lTime:'Available times',hPay:'3. Deposit to confirm',go:'Confirm booking',booking:'Booking…',pickDoc:'Choose a doctor and a day to see times.',loading:'Loading…',noTimes:'No available times that day. Try another day.',timesFail:'Could not load times.',
+ /*docs*/
+ en:{title:'Book an appointment',sub0:'Loading…',subClosed:'Online booking is not open right now. Please contact the clinic on WhatsApp.',sub1:'Enter your details to start.',sub2:'Choose your visit, doctor and time.',lName:'Full name',lPhone:'Phone number (WhatsApp)',lGender:'Gender',gMale:'Male',gFemale:'Female',eGender:'Please choose your gender.',noDocs:'No doctors are available for this visit type.',next:'Continue',hType:'1. Visit type',hDoc:'2. Doctor & time',lDate:'Day',lOther:'Or pick another date',lTime:'Available times',hPay:'3. Deposit to confirm',go:'Confirm booking',booking:'Booking…',pickDoc:'Choose a doctor and a day to see times.',loading:'Loading…',noTimes:'No available times that day. Try another day.',timesFail:'Could not load times.',
   dep1:'Deposit',dep2:'half of the fee ({p} EGP). It is non-refundable and is deducted from your fee at the clinic.',dep3:'Transfer by InstaPay to:',copy:'Copy',copied:'Copied ✓',dep4:'Then upload the transfer screenshot below.',dep5:'Have an active package with us? Skip the screenshot — no deposit needed.',up:'Tap to upload the transfer screenshot',upDone:'Tap to change the screenshot',
   eName:'Please enter your full name.',ePhone:'Please enter a valid phone number.',eDoc:'Please choose a doctor.',eTime:'Please choose a day and a time.',eImg:'Please choose an image file.',eConn:'Connection problem. Please try again.',eNA:'Booking is not available right now.',
   done:'Your booking is confirmed',pkg:'Your active package covers this visit.',depRec:'Deposit received: {d} EGP (non-refundable, deducted from your fee).',addr:'92 Sayed El-Merghany St., El-Montaza, Heliopolis, Cairo',map:'Open the location on the map',arrive:'Please arrive 5 minutes early. To change the time, contact the clinic on WhatsApp at least 5 hours before.',dr:'Dr. ',egp:'EGP',at:'at',other:'العربية'},
- ar:{title:'احجز ميعادك',sub0:'جاري التحميل…',subClosed:'الحجز الأونلاين مقفول دلوقتي. من فضلك كلّم العيادة على واتساب.',sub1:'اكتب بياناتك عشان تبدأ.',sub2:'اختار نوع الزيارة والدكتور والميعاد.',lName:'الاسم بالكامل',lPhone:'رقم التليفون (واتساب)',next:'متابعة',hType:'١. نوع الزيارة',hDoc:'٢. الدكتور والميعاد',lDate:'اليوم',lOther:'أو اختار تاريخ تاني',lTime:'المواعيد المتاحة',hPay:'٣. العربون لتأكيد الحجز',go:'تأكيد الحجز',booking:'جاري الحجز…',pickDoc:'اختار الدكتور واليوم عشان تشوف المواعيد.',loading:'جاري التحميل…',noTimes:'مفيش مواعيد متاحة اليوم ده. جرّب يوم تاني.',timesFail:'مقدرناش نحمّل المواعيد.',
-  dep1:'العربون',dep2:'نص سعر الكشف ({p} جنيه). العربون غير مسترد ويتخصم من الحساب في العيادة.',dep3:'حوّل بـ InstaPay على:',copy:'نسخ',copied:'تم النسخ ✓',dep4:'وبعدين ارفع صورة التحويل تحت.',dep5:'عندك باكدج شغال معانا؟ سيب صورة التحويل فاضية، مش محتاج عربون.',up:'اضغط لرفع صورة التحويل',upDone:'اضغط لتغيير الصورة',
+ ar:{title:'احجز ميعادك',sub0:'جاري التحميل…',subClosed:'الحجز الأونلاين مقفول دلوقتي. من فضلك كلّم العيادة على واتساب.',sub1:'اكتب بياناتك عشان تبدأ.',sub2:'اختار نوع الزيارة والدكتور والميعاد.',lName:'الاسم بالكامل',lPhone:'رقم التليفون (واتساب)',lGender:'النوع',gMale:'ذكر',gFemale:'أنثى',eGender:'من فضلك اختار النوع.',noDocs:'مفيش دكاترة متاحين لنوع الزيارة ده.',next:'متابعة',hType:'١. نوع الزيارة',hDoc:'٢. الدكتور والميعاد',lDate:'اليوم',lOther:'أو اختار تاريخ تاني',lTime:'المواعيد المتاحة',hPay:'٣. العربون لتأكيد الحجز',go:'تأكيد الحجز',booking:'جاري الحجز…',pickDoc:'اختار الدكتور واليوم عشان تشوف المواعيد.',loading:'جاري التحميل…',noTimes:'مفيش مواعيد متاحة اليوم ده. جرّب يوم تاني.',timesFail:'مقدرناش نحمّل المواعيد.',
+  dep1:'العربون',dep2:'نص السعر ({p} جنيه). العربون غير مسترد ويتخصم من الحساب في العيادة.',dep3:'حوّل بـ InstaPay على:',copy:'نسخ',copied:'تم النسخ ✓',dep4:'وبعدين ارفع صورة التحويل تحت.',dep5:'عندك باكدج شغال معانا؟ سيب صورة التحويل فاضية، مش محتاج عربون.',up:'اضغط لرفع صورة التحويل',upDone:'اضغط لتغيير الصورة',
   eName:'من فضلك اكتب اسمك بالكامل.',ePhone:'من فضلك اكتب رقم تليفون صحيح.',eDoc:'من فضلك اختار الدكتور.',eTime:'من فضلك اختار اليوم والميعاد.',eImg:'من فضلك اختار ملف صورة.',eConn:'فيه مشكلة في الاتصال. جرّب تاني.',eNA:'الحجز مش متاح دلوقتي.',
-  done:'تم تأكيد حجزك',pkg:'الباكدج بتاعك بيغطي الزيارة دي.',depRec:'تم استلام العربون: {d} جنيه (غير مسترد ويتخصم من الحساب).',addr:'٩٢ شارع سيد المرغني، المنتزه، مصر الجديدة، القاهرة',map:'افتح الموقع على الخريطة',arrive:'من فضلك تعالى قبل الميعاد بـ 5 دقايق. لو عايز تغيّر الميعاد كلّم العيادة على واتساب قبلها بـ 5 ساعات على الأقل.',dr:'د. ',egp:'جنيه',at:'الساعة',other:'EN'}
+  done:'تم تأكيد حجزك',pkg:'الباكدج بتاعك بيغطي الزيارة دي.',depRec:'تم استلام العربون: {d} جنيه (غير مسترد ويتخصم من الحساب).',addr:'٩٢ شارع سيد المرغني، المنتزه، مصر الجديدة، القاهرة',map:'افتح الموقع على الخريطة',arrive:'من فضلك تعالى قبل الميعاد بـ 5 دقايق. لو عايز تغيّر الميعاد كلّم العيادة على واتساب قبلها بـ 5 ساعات على الأقل.',dr:'Dr. ',egp:'جنيه',at:'الساعة',other:'EN'}
 };
 var SRV={'Booking is not available right now.':['eNA'],'Please enter your full name and a valid phone number.':['eName'],
  'Sorry, that time is no longer available. Please pick another one.':'عذراً، الميعاد ده اتحجز. اختار ميعاد تاني.',
@@ -4510,7 +4528,10 @@ var SRV={'Booking is not available right now.':['eNA'],'Please enter your full n
  'Something went wrong. Please try again.':'حصل خطأ. جرّب تاني.',
  'Could not save your booking. Please try again.':'مقدرناش نسجل الحجز. جرّب تاني.',
  'Could not save the screenshot. Please try again.':'مقدرناش نحفظ الصورة. جرّب تاني.',
- 'Online booking is closed right now.':'الحجز الأونلاين مقفول دلوقتي.'};
+ 'Online booking is closed right now.':'الحجز الأونلاين مقفول دلوقتي.',
+ 'Please choose your gender.':'من فضلك اختار النوع.',
+ 'This doctor is not available for your booking. Please choose another doctor.':'الدكتور ده مش متاح لحجزك. اختار دكتور تاني.',
+ 'This doctor does not take check-ups. Please choose another doctor.':'الدكتور ده مش بياخد كشوفات. اختار دكتور تاني.'};
 function $(i){return document.getElementById(i)}
 function t(k,r){var s=(T[lang]||T.en)[k]; if(s===undefined)s=T.en[k]||''; if(r){for(var x in r)s=s.replace('{'+x+'}',r[x])} return s}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -4523,7 +4544,7 @@ function setStep(n){ for(var i=1;i<=3;i++)$('d'+i).className='dot'+(i<=n?' on':'
 function applyLang(){
   document.documentElement.lang=lang; document.documentElement.dir=lang==='ar'?'rtl':'ltr';
   $('langBtn').textContent=t('other'); $('title').textContent=t('title');
-  $('lName').textContent=t('lName'); $('lPhone').textContent=t('lPhone'); $('next').textContent=t('next');
+  $('lName').textContent=t('lName'); $('lPhone').textContent=t('lPhone'); $('lGender').textContent=t('lGender'); $('gMale').textContent=t('gMale'); $('gFemale').textContent=t('gFemale'); $('next').textContent=t('next');
   $('hType').textContent=t('hType'); $('hDoc').textContent=t('hDoc'); $('lDate').textContent=t('lDate'); $('lOther').textContent=t('lOther'); $('lTime').textContent=t('lTime'); $('hPay').textContent=t('hPay');
   $('go').textContent=$('go').disabled?t('booking'):t('go');
   $('upTxt').textContent=shotData?t('upDone'):t('up');
@@ -4531,9 +4552,13 @@ function applyLang(){
   if(cfg&&!cfg.locked&&cfg.enabled){ renderTypes(); renderDocs(); renderDays(); depText(); if(chosenDoc&&$('date').value) loadSlots(); else $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('pickDoc')+'</div>'; }
 }
 $('langBtn').onclick=function(){ lang=lang==='ar'?'en':'ar'; try{localStorage.setItem('bl',lang)}catch(e){} applyLang(); };
-function renderTypes(){ $('types').innerHTML=cfg.types.map(function(x){ return '<button type="button" class="opt'+(x.key===chosenType?' on':'')+'" data-k="'+esc(x.key)+'"><span>'+esc(x.label)+'</span><span class="pr">'+num(x.price)+' '+t('egp')+'</span></button>'; }).join('');
-  Array.prototype.forEach.call($('types').querySelectorAll('.opt'),function(b){ b.onclick=function(){ chosenType=b.dataset.k; renderTypes(); depText(); }; }); }
-function renderDocs(){ $('docs').innerHTML=cfg.doctors.map(function(d){ return '<button type="button" class="chip'+(d.id===chosenDoc?' on':'')+'" data-d="'+esc(d.id)+'">'+t('dr')+esc(d.name)+'</button>'; }).join('');
+function tLabel(x){ if(lang==='ar'){ if(x.label_ar) return x.label_ar; var l=x.label||''; if(/check-?up/i.test(l)) return 'Check-up — كشف (جلسة تقييمية)'; if(/(1|one)\s*body\s*part/i.test(l)) return 'جلسة — على مكان واحد (عضو واحد)'; if(/(2|two)\s*body\s*parts?/i.test(l)) return 'جلسة — على أكتر من مكان (عضوين)'; } return l||x.label; }
+function renderTypes(){ $('types').innerHTML=cfg.types.map(function(x){ return '<button type="button" class="opt'+(x.key===chosenType?' on':'')+'" data-k="'+esc(x.key)+'"><span>'+esc(tLabel(x))+'</span><span class="pr">'+num(x.price)+' '+t('egp')+'</span></button>'; }).join('');
+  Array.prototype.forEach.call($('types').querySelectorAll('.opt'),function(b){ b.onclick=function(){ chosenType=b.dataset.k; renderTypes(); renderDocs(); depText(); }; }); }
+function docList(){ var x=typeObj(); return cfg.doctors.filter(function(d){ return !(x&&x.visit_type==='checkup'&&d.checkups===false); }); }
+function renderDocs(){ var L=docList(); if(chosenDoc&&!L.some(function(d){return d.id===chosenDoc})){ chosenDoc=''; loadSlots(); }
+  if(!L.length){ $('docs').innerHTML='<div class="hint">'+t('noDocs')+'</div>'; return; }
+  $('docs').innerHTML=L.map(function(d){ return '<button type="button" class="chip'+(d.id===chosenDoc?' on':'')+'" data-d="'+esc(d.id)+'">'+t('dr')+esc(d.name)+'</button>'; }).join('');
   Array.prototype.forEach.call($('docs').querySelectorAll('.chip'),function(b){ b.onclick=function(){ chosenDoc=b.dataset.d; renderDocs(); loadSlots(); }; }); }
 function renderDays(){ var n=Math.min(cfg.max_days_ahead,14),h='',now=new Date(),cur=$('date').value;
   for(var i=0;i<n;i++){ var d=new Date(now.getFullYear(),now.getMonth(),now.getDate()+i); if(d.getDay()===5)continue; var key=ymd(d);
@@ -4545,7 +4570,7 @@ function depText(){ var x=typeObj(); if(!x){ $('depBox').innerHTML='<div class="
 function loadSlots(){ chosenTime=''; var dt=$('date').value;
   if(!chosenDoc||!dt){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('pickDoc')+'</div>'; return; }
   $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('loading')+'</div>';
-  fetch('/api/book/slots?doctor='+encodeURIComponent(chosenDoc)+'&date='+dt+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(j){
+  fetch('/api/book/slots?doctor='+encodeURIComponent(chosenDoc)+'&date='+dt+'&gender='+gender+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(j){
     if(!j.times||!j.times.length){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('noTimes')+'</div>'; return; }
     $('slots').innerHTML=j.times.map(function(x){return '<button type="button" class="slot" data-t="'+x+'">'+fmtTime(x)+'</button>'}).join('');
     Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(b){ b.onclick=function(){ chosenTime=b.dataset.t; Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(x){x.classList.toggle('on',x===b)}); }; });
@@ -4554,12 +4579,14 @@ function init(){ applyLang(); fetch('/api/book/config').then(function(r){return 
 $('next').onclick=function(){ $('err1').textContent='';
   if($('name').value.trim().length<3) return $('err1').textContent=t('eName');
   if($('phone').value.replace(/\D/g,'').length<10) return $('err1').textContent=t('ePhone');
+  if(!gender) return $('err1').textContent=t('eGender');
   $('next').disabled=true;
-  fetch('/api/book/config?name='+encodeURIComponent($('name').value.trim())+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(c){
+  fetch('/api/book/config?name='+encodeURIComponent($('name').value.trim())+'&gender='+gender+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(c){
     if(!c.enabled||c.locked){ $('err1').textContent=t('eNA'); $('next').disabled=false; return; }
     cfg=c; chosenType=c.types.length===1?c.types[0].key:''; $('step1').style.display='none'; $('form').style.display='block'; setStep(2); applyLang(); window.scrollTo(0,0);
   }).catch(function(){ $('err1').textContent=t('eConn'); $('next').disabled=false; }); };
 $('date').onchange=function(){ renderDays(); loadSlots(); };
+Array.prototype.forEach.call(document.querySelectorAll('#genderBox .chip'),function(b){ b.onclick=function(){ gender=b.dataset.g; Array.prototype.forEach.call(document.querySelectorAll('#genderBox .chip'),function(x){ x.classList.toggle('on',x===b); }); }; });
 $('shot').onchange=function(){ var f=this.files[0]; shotData=null; $('prev').style.display='none'; $('upTxt').textContent=t('up'); if(!f)return;
   var img=new Image(),url=URL.createObjectURL(f); img.onload=function(){ var s=Math.min(1,1400/Math.max(img.width,img.height)),cv=document.createElement('canvas'); cv.width=Math.round(img.width*s); cv.height=Math.round(img.height*s); cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
     var u=cv.toDataURL('image/jpeg',0.82); shotData=u.split(',')[1]; shotType='image/jpeg'; $('prev').src=u; $('prev').style.display='block'; $('upTxt').textContent=t('upDone'); URL.revokeObjectURL(url); setStep(3); };
@@ -4569,11 +4596,11 @@ $('go').onclick=function(){ $('err').textContent='';
   if(!chosenDoc) return $('err').textContent=t('eDoc');
   if(!$('date').value||!chosenTime) return $('err').textContent=t('eTime');
   $('go').disabled=true; $('go').textContent=t('booking');
-  fetch('/api/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('name').value,phone:$('phone').value,type:chosenType,doctor:chosenDoc,date:$('date').value,time:chosenTime,shotBase64:shotData,shotType:shotType,website:$('website').value})})
+  fetch('/api/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('name').value,gender:gender,phone:$('phone').value,type:chosenType,doctor:chosenDoc,date:$('date').value,time:chosenTime,shotBase64:shotData,shotType:shotType,website:$('website').value})})
   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
     if(!x.ok){ $('err').textContent=srv(x.j.error||'Something went wrong. Please try again.'); $('go').disabled=false; $('go').textContent=t('go'); if(/no longer|just took/.test(x.j.error||''))loadSlots(); return; }
     var j=x.j; var dd=new Date(j.date+'T12:00:00'); var dtxt=dd.toLocaleDateString(lang==='ar'?'ar-EG':'en-GB',{weekday:'long',day:'numeric',month:'long'});
-    $('app').innerHTML='<div class="top"><span></span><button type="button" class="lang" id="langBtn2">'+t('other')+'</button></div><img class="logo" src="/clinic-logo.png" alt="Empower"><div class="card ok"><div class="check">✓</div><h1>'+t('done')+'</h1><div class="sum">'+t('dr')+esc(j.doctor)+'<br>'+esc(dtxt)+' '+t('at')+' '+fmtTime(j.time)+'<br>'+esc(j.label)+'</div><div class="hint">'+(j.package?t('pkg'):t('depRec',{d:num(j.deposit)}))+'</div></div><div class="where">📍 '+t('addr')+'<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">'+t('map')+'</a><br><br>'+t('arrive')+'</div>';
+    $('app').innerHTML='<div class="top"><span></span><button type="button" class="lang" id="langBtn2">'+t('other')+'</button></div><img class="logo" src="/clinic-logo.png" alt="Empower"><div class="card ok"><div class="check">✓</div><h1>'+t('done')+'</h1><div class="sum">'+t('dr')+esc(j.doctor)+'<br>'+esc(dtxt)+' '+t('at')+' '+fmtTime(j.time)+'<br>'+esc(tLabel(typeObj()||{label:j.label}))+'</div><div class="hint">'+(j.package?t('pkg'):t('depRec',{d:num(j.deposit)}))+'</div></div><div class="where">📍 '+t('addr')+'<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">'+t('map')+'</a><br><br>'+t('arrive')+'</div>';
     $('langBtn2').onclick=function(){ lang=lang==='ar'?'en':'ar'; try{localStorage.setItem('bl',lang)}catch(e){} location.reload(); };
   }).catch(function(){ $('err').textContent=t('eConn'); $('go').disabled=false; $('go').textContent=t('go'); }); };
 init();
