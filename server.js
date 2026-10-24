@@ -4411,79 +4411,174 @@ app.post('/api/booking/deposits/:id/review', requireOwnerDoctor, async (req, res
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
-const BOOK_PAGE = String.raw`<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Book an appointment - Empower</title>
+const BOOK_PAGE = String.raw`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="theme-color" content="#ffffff"><title>Book an appointment - Empower</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-*{box-sizing:border-box}body{margin:0;background:#f6f4ee;color:#12363a;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;padding:16px}
-.c{max-width:560px;margin:12px auto;background:#fff;border:1px solid #e4dfd0;border-radius:14px;padding:22px}
-.logo{display:block;max-width:240px;width:70%;margin:0 auto 14px}h1{font-size:1.25rem;margin:0 0 4px;text-align:center}.sub{font-size:.85rem;color:#5b6863;text-align:center;margin-bottom:16px}
-label{display:block;font-size:.82rem;font-weight:700;margin:14px 0 5px}input,select{width:100%;padding:11px;border:1px solid #d8d3c3;border-radius:9px;font-size:1rem;background:#fff}
-.slots{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}.slot{padding:9px 14px;border:1px solid #12363a;border-radius:999px;background:#fff;color:#12363a;font-size:.9rem;cursor:pointer}.slot.on{background:#12363a;color:#fff}
-.box{background:#fbf6e8;border:1px solid #ecd9a6;border-radius:10px;padding:12px;font-size:.86rem;line-height:1.5;margin-top:14px}
-button.go{width:100%;margin-top:18px;padding:14px;border:0;border-radius:10px;background:#12363a;color:#fff;font-size:1rem;font-weight:700;cursor:pointer}button.go:disabled{opacity:.5}
-.err{color:#b3261e;font-size:.85rem;margin-top:10px;min-height:1em}.hp{position:absolute;left:-9999px}.ok{text-align:center}.ok h1{color:#1b7a4a}
-#prev{max-width:100%;max-height:220px;margin-top:8px;border-radius:8px;display:none}.muted{color:#6a756f;font-size:.8rem}
-</style></head><body><div class="c" id="card"><img class="logo" src="/clinic-logo.png" alt="Empower"><h1>Book an appointment</h1><div class="sub" id="sub">Loading…</div><div id="step1" style="display:none">
+:root{--ink:#12363a;--muted:#667570;--gold:#b07a1f;--bg:#f7f8f6;--line:#e6e9e4;--soft:#eef4f2;--tint:#fbf5e6}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{font-size:18px}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:'Cairo',-apple-system,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.55;padding:0 0 40px}
+.wrap{max-width:520px;margin:0 auto;padding:18px 16px}
+.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.lang{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:6px 16px;font:600 .8rem 'Cairo',sans-serif;cursor:pointer}
+.logo{display:block;width:210px;max-width:60%;margin:6px auto 8px}
+h1{font-size:1.45rem;text-align:center;margin:6px 0 2px;font-weight:700}
+.sub{text-align:center;color:var(--muted);font-size:.9rem;margin-bottom:18px}
+.steps{display:flex;justify-content:center;gap:8px;margin:0 0 18px}
+.dot{width:34px;height:5px;border-radius:5px;background:var(--line)}.dot.on{background:var(--gold)}
+.card{background:#fff;border-radius:18px;padding:20px;box-shadow:0 2px 14px rgba(18,54,58,.06);margin-bottom:14px}
+.card h2{font-size:1rem;margin:0 0 12px;font-weight:700}
+label{display:block;font-size:.88rem;font-weight:600;margin:14px 0 6px;color:var(--ink)}
+label:first-child{margin-top:0}
+input[type=text],input[type=tel],input[type=date]{width:100%;padding:14px;border:1.5px solid var(--line);border-radius:12px;font:400 1rem 'Cairo',sans-serif;background:#fff;color:var(--ink);outline:none}
+input:focus{border-color:var(--gold)}
+.opts{display:grid;gap:10px}
+.opt{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 16px;border:1.5px solid var(--line);border-radius:14px;background:#fff;cursor:pointer;font:600 .95rem 'Cairo',sans-serif;color:var(--ink);text-align:start;width:100%}
+.opt small{font-weight:400;color:var(--muted);font-size:.78rem;display:block}
+.opt .pr{color:var(--gold);font-weight:700;white-space:nowrap}
+.opt.on{border-color:var(--ink);background:var(--soft)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{padding:10px 16px;border:1.5px solid var(--line);border-radius:999px;background:#fff;font:600 .92rem 'Cairo',sans-serif;color:var(--ink);cursor:pointer}
+.chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.days{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none}.days::-webkit-scrollbar{display:none}
+.day{flex:0 0 auto;min-width:64px;padding:10px 8px;text-align:center;border:1.5px solid var(--line);border-radius:14px;background:#fff;cursor:pointer;font-family:'Cairo',sans-serif;color:var(--ink)}
+.day b{display:block;font-size:1.15rem;line-height:1.2}.day span{font-size:.72rem;color:var(--muted)}
+.day.on{background:var(--ink);border-color:var(--ink);color:#fff}.day.on span{color:#d6e2de}
+.slots{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.slot{padding:12px 4px;border:1.5px solid var(--line);border-radius:12px;background:#fff;font:600 .95rem 'Cairo',sans-serif;color:var(--ink);cursor:pointer}
+.slot.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.hint{color:var(--muted);font-size:.85rem;padding:6px 0}
+.dep{background:var(--tint);border-radius:14px;padding:16px;font-size:.9rem}
+.dep .big{font-size:1.7rem;font-weight:700;color:var(--ink);line-height:1.2}
+.dep .acct{display:flex;align-items:center;justify-content:space-between;gap:8px;background:#fff;border-radius:10px;padding:10px 12px;margin:10px 0;font-weight:700;direction:ltr}
+.dep .copy{border:none;background:var(--ink);color:#fff;border-radius:8px;padding:6px 12px;font:600 .78rem 'Cairo',sans-serif;cursor:pointer}
+.up{display:block;border:2px dashed #cfd6d1;border-radius:14px;padding:18px;text-align:center;color:var(--muted);font-size:.92rem;cursor:pointer;background:#fcfdfc}
+.up input{display:none}#prev{max-width:100%;max-height:230px;border-radius:10px;margin-top:10px;display:none}
+button.go{width:100%;margin-top:6px;padding:16px;border:0;border-radius:14px;background:var(--ink);color:#fff;font:700 1.05rem 'Cairo',sans-serif;cursor:pointer}
+button.go:disabled{opacity:.5}
+.err{color:#b3261e;font-size:.88rem;min-height:1.3em;margin:8px 0 0}
+.hp{position:absolute;left:-9999px;opacity:0}
+.ok{text-align:center}.ok .check{width:64px;height:64px;border-radius:50%;background:#e4f4ea;color:#1b7a4a;display:flex;align-items:center;justify-content:center;font-size:2rem;margin:6px auto 10px}
+.ok h1{color:#1b7a4a}.sum{background:var(--soft);border-radius:14px;padding:14px;margin:14px 0;font-weight:600}
+.where{background:#fff;border-radius:14px;padding:14px;font-size:.88rem;text-align:start;box-shadow:0 2px 14px rgba(18,54,58,.06)}
+a{color:var(--gold);font-weight:600}
+</style></head><body><div class="wrap" id="app">
+<div class="top"><span></span><button type="button" class="lang" id="langBtn">EN</button></div>
+<img class="logo" src="/clinic-logo.png" alt="Empower">
+<h1 id="title"></h1><div class="sub" id="sub"></div>
+<div class="steps"><i class="dot on" id="d1"></i><i class="dot" id="d2"></i><i class="dot" id="d3"></i></div>
+
+<div id="step1" style="display:none"><div class="card">
 <input class="hp" id="website" tabindex="-1" autocomplete="off">
-<label>Full name</label><input id="name" autocomplete="name">
-<label>Phone number (WhatsApp)</label><input id="phone" type="tel" inputmode="tel" autocomplete="tel">
-<div class="err" id="err1"></div>
-<button class="go" id="next">Continue</button></div>
+<label id="lName"></label><input type="text" id="name" autocomplete="name">
+<label id="lPhone"></label><input type="tel" id="phone" inputmode="tel" autocomplete="tel" dir="ltr" style="text-align:start">
+<div class="err" id="err1"></div></div>
+<button class="go" id="next"></button></div>
+
 <div id="form" style="display:none">
-<label>Visit type</label><select id="type"></select>
-<label>Doctor</label><select id="doctor"></select>
-<label>Date</label><input id="date" type="date">
-<label>Available times</label><div class="slots" id="slots"><span class="muted">Choose a doctor and a date.</span></div>
-<div class="box" id="depositBox"></div>
-<div id="shotWrap"><label>InstaPay transfer screenshot</label><input id="shot" type="file" accept="image/*"><img id="prev" alt=""></div>
+<div class="card"><h2 id="hType"></h2><div class="opts" id="types"></div></div>
+<div class="card"><h2 id="hDoc"></h2><div class="chips" id="docs"></div>
+<label id="lDate" style="margin-top:18px"></label><div class="days" id="days"></div>
+<label id="lOther" style="margin-top:12px"></label><input type="date" id="date">
+<label id="lTime" style="margin-top:18px"></label><div class="slots" id="slots"></div></div>
+<div class="card"><h2 id="hPay"></h2><div class="dep" id="depBox"></div>
+<div id="shotWrap" style="margin-top:14px"><label class="up"><span id="upTxt"></span><input type="file" id="shot" accept="image/*"><img id="prev" alt=""></label></div></div>
 <div class="err" id="err"></div>
-<button class="go" id="go">Confirm booking</button></div></div>
+<button class="go" id="go"></button></div>
+</div>
 <script>
-var cfg=null,chosenTime='',shotData=null,shotType='';
+var cfg=null,chosenTime='',chosenType='',chosenDoc='',shotData=null,shotType='',lang='ar';
+try{lang=localStorage.getItem('bl')||((navigator.language||'').toLowerCase().indexOf('en')===0?'en':'ar')}catch(e){}
+var T={
+ en:{title:'Book an appointment',sub0:'Loading…',subClosed:'Online booking is not open right now. Please contact the clinic on WhatsApp.',sub1:'Enter your details to start.',sub2:'Choose your visit, doctor and time.',lName:'Full name',lPhone:'Phone number (WhatsApp)',next:'Continue',hType:'1. Visit type',hDoc:'2. Doctor & time',lDate:'Day',lOther:'Or pick another date',lTime:'Available times',hPay:'3. Deposit to confirm',go:'Confirm booking',booking:'Booking…',pickDoc:'Choose a doctor and a day to see times.',loading:'Loading…',noTimes:'No available times that day. Try another day.',timesFail:'Could not load times.',
+  dep1:'Deposit',dep2:'half of the fee ({p} EGP). It is non-refundable and is deducted from your fee at the clinic.',dep3:'Transfer by InstaPay to:',copy:'Copy',copied:'Copied ✓',dep4:'Then upload the transfer screenshot below.',dep5:'Have an active package with us? Skip the screenshot — no deposit needed.',up:'Tap to upload the transfer screenshot',upDone:'Tap to change the screenshot',
+  eName:'Please enter your full name.',ePhone:'Please enter a valid phone number.',eDoc:'Please choose a doctor.',eTime:'Please choose a day and a time.',eImg:'Please choose an image file.',eConn:'Connection problem. Please try again.',eNA:'Booking is not available right now.',
+  done:'Your booking is confirmed',pkg:'Your active package covers this visit.',depRec:'Deposit received: {d} EGP (non-refundable, deducted from your fee).',addr:'92 Sayed El-Merghany St., El-Montaza, Heliopolis, Cairo',map:'Open the location on the map',arrive:'Please arrive 5 minutes early. To change the time, contact the clinic on WhatsApp at least 5 hours before.',dr:'Dr. ',egp:'EGP',at:'at',other:'العربية'},
+ ar:{title:'احجز ميعادك',sub0:'جاري التحميل…',subClosed:'الحجز الأونلاين مقفول دلوقتي. من فضلك كلّم العيادة على واتساب.',sub1:'اكتب بياناتك عشان تبدأ.',sub2:'اختار نوع الزيارة والدكتور والميعاد.',lName:'الاسم بالكامل',lPhone:'رقم التليفون (واتساب)',next:'متابعة',hType:'١. نوع الزيارة',hDoc:'٢. الدكتور والميعاد',lDate:'اليوم',lOther:'أو اختار تاريخ تاني',lTime:'المواعيد المتاحة',hPay:'٣. العربون لتأكيد الحجز',go:'تأكيد الحجز',booking:'جاري الحجز…',pickDoc:'اختار الدكتور واليوم عشان تشوف المواعيد.',loading:'جاري التحميل…',noTimes:'مفيش مواعيد متاحة اليوم ده. جرّب يوم تاني.',timesFail:'مقدرناش نحمّل المواعيد.',
+  dep1:'العربون',dep2:'نص سعر الكشف ({p} جنيه). العربون غير مسترد ويتخصم من الحساب في العيادة.',dep3:'حوّل بـ InstaPay على:',copy:'نسخ',copied:'تم النسخ ✓',dep4:'وبعدين ارفع صورة التحويل تحت.',dep5:'عندك باكدج شغال معانا؟ سيب صورة التحويل فاضية، مش محتاج عربون.',up:'اضغط لرفع صورة التحويل',upDone:'اضغط لتغيير الصورة',
+  eName:'من فضلك اكتب اسمك بالكامل.',ePhone:'من فضلك اكتب رقم تليفون صحيح.',eDoc:'من فضلك اختار الدكتور.',eTime:'من فضلك اختار اليوم والميعاد.',eImg:'من فضلك اختار ملف صورة.',eConn:'فيه مشكلة في الاتصال. جرّب تاني.',eNA:'الحجز مش متاح دلوقتي.',
+  done:'تم تأكيد حجزك',pkg:'الباكدج بتاعك بيغطي الزيارة دي.',depRec:'تم استلام العربون: {d} جنيه (غير مسترد ويتخصم من الحساب).',addr:'٩٢ شارع سيد المرغني، المنتزه، مصر الجديدة، القاهرة',map:'افتح الموقع على الخريطة',arrive:'من فضلك تعالى قبل الميعاد بـ 5 دقايق. لو عايز تغيّر الميعاد كلّم العيادة على واتساب قبلها بـ 5 ساعات على الأقل.',dr:'د. ',egp:'جنيه',at:'الساعة',other:'EN'}
+};
+var SRV={'Booking is not available right now.':['eNA'],'Please enter your full name and a valid phone number.':['eName'],
+ 'Sorry, that time is no longer available. Please pick another one.':'عذراً، الميعاد ده اتحجز. اختار ميعاد تاني.',
+ 'Sorry, someone just took that time. Please pick another one. (Your screenshot was not used.)':'عذراً، حد حجز الميعاد ده دلوقتي. اختار ميعاد تاني. (صورة التحويل ماتستخدمتش.)',
+ 'Please upload the InstaPay transfer screenshot to confirm your booking.':'من فضلك ارفع صورة تحويل InstaPay عشان نأكد الحجز.',
+ 'The screenshot is not valid (max 4 MB).':'الصورة مش صالحة (الحد الأقصى 4 ميجا).',
+ 'Please choose a visit type and a doctor.':'من فضلك اختار نوع الزيارة والدكتور.',
+ 'Too many attempts. Please try again later.':'محاولات كتير. جرّب تاني بعد شوية.',
+ 'Too many requests. Please wait a moment.':'طلبات كتير. استنى شوية.',
+ 'Something went wrong. Please try again.':'حصل خطأ. جرّب تاني.',
+ 'Could not save your booking. Please try again.':'مقدرناش نسجل الحجز. جرّب تاني.',
+ 'Could not save the screenshot. Please try again.':'مقدرناش نحفظ الصورة. جرّب تاني.',
+ 'Online booking is closed right now.':'الحجز الأونلاين مقفول دلوقتي.'};
 function $(i){return document.getElementById(i)}
+function t(k,r){var s=(T[lang]||T.en)[k]; if(s===undefined)s=T.en[k]||''; if(r){for(var x in r)s=s.replace('{'+x+'}',r[x])} return s}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function srv(m){ if(lang==='en')return m; var v=SRV[m]; if(!v)return m; return typeof v==='string'?v:t(v[0]); }
+function num(n){ return lang==='ar'?String(n).replace(/\d/g,function(d){return '٠١٢٣٤٥٦٧٨٩'[d]}):String(n); }
+function fmtTime(hm){ var p=hm.split(':'),h=+p[0],m=p[1],ap=h>=12?(lang==='ar'?'م':'PM'):(lang==='ar'?'ص':'AM'); h=h%12; if(h===0)h=12; return num(h+':'+m)+' '+ap; }
 function ymd(d){var m=d.getMonth()+1,dd=d.getDate();return d.getFullYear()+'-'+(m<10?'0':'')+m+'-'+(dd<10?'0':'')+dd}
-function typeObj(){return cfg.types.filter(function(t){return t.key===$('type').value})[0]}
-function depositText(){var t=typeObj();if(!t)return;
-$('depositBox').innerHTML='<b>Deposit: '+t.deposit+' EGP</b> (half of the '+t.price+' EGP fee). The deposit is <b>non-refundable</b> and is deducted from your fee at the clinic.<br><br>'+(cfg.instapay?'Transfer it by InstaPay to: <b>'+esc(cfg.instapay)+'</b><br>':'')+(cfg.note?esc(cfg.note)+'<br>':'')+'Then upload the screenshot below to confirm your booking.<br><span class="muted">Already have an active package with us? Leave the screenshot empty - no deposit is needed.</span>'}
-function loadSlots(){chosenTime='';var d=$('doctor').value,dt=$('date').value;if(!d||!dt){$('slots').innerHTML='<span class="muted">Choose a doctor and a date.</span>';return}
-$('slots').innerHTML='<span class="muted">Loading…</span>';
-fetch('/api/book/slots?doctor='+encodeURIComponent(d)+'&date='+dt+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(j){
-if(!j.times||!j.times.length){$('slots').innerHTML='<span class="muted">No available times that day. Try another date.</span>';return}
-$('slots').innerHTML=j.times.map(function(t){return '<button type="button" class="slot" data-t="'+t+'">'+t+'</button>'}).join('');
-Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(b){b.onclick=function(){chosenTime=b.dataset.t;Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(x){x.classList.toggle('on',x===b)})}})
-}).catch(function(){$('slots').innerHTML='<span class="muted">Could not load times.</span>'})}
-function init(){fetch('/api/book/config').then(function(r){return r.json()}).then(function(c){
-if(!c.enabled){$('sub').textContent='Online booking is not open right now. Please contact the clinic on WhatsApp.';return}
-$('sub').textContent='Enter your name and phone number to start.';$('step1').style.display='block'
-}).catch(function(){$('sub').textContent='Booking is not available right now.'})}
-$('next').onclick=function(){$('err1').textContent='';
-if($('name').value.trim().length<3)return $('err1').textContent='Please enter your full name.';
-if($('phone').value.replace(/\D/g,'').length<10)return $('err1').textContent='Please enter a valid phone number.';
-$('next').disabled=true;
-fetch('/api/book/config?name='+encodeURIComponent($('name').value.trim())+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(c){cfg=c;
-if(!c.enabled||c.locked){$('err1').textContent='Booking is not available right now.';$('next').disabled=false;return}
-$('name').readOnly=true;$('phone').readOnly=true;$('next').style.display='none';
-$('sub').textContent='Choose your visit, doctor and time.';$('form').style.display='block';
-$('type').innerHTML=c.types.map(function(t){return '<option value="'+esc(t.key)+'">'+esc(t.label)+' - '+t.price+' EGP</option>'}).join('');
-$('doctor').innerHTML='<option value="">Choose a doctor…</option>'+c.doctors.map(function(d){return '<option value="'+esc(d.id)+'">Dr. '+esc(d.name)+'</option>'}).join('');
-var now=new Date(),max=new Date(now.getTime()+c.max_days_ahead*86400000);$('date').min=ymd(now);$('date').max=ymd(max);
-depositText();$('type').onchange=depositText;$('doctor').onchange=loadSlots;$('date').onchange=loadSlots;
-}).catch(function(){$('err1').textContent='Connection problem. Please try again.';$('next').disabled=false})}
-$('shot').onchange=function(){var f=this.files[0];shotData=null;$('prev').style.display='none';if(!f)return;
-var img=new Image(),url=URL.createObjectURL(f);img.onload=function(){var s=Math.min(1,1400/Math.max(img.width,img.height)),cv=document.createElement('canvas');cv.width=Math.round(img.width*s);cv.height=Math.round(img.height*s);cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
-var u=cv.toDataURL('image/jpeg',0.82);shotData=u.split(',')[1];shotType='image/jpeg';$('prev').src=u;$('prev').style.display='block';URL.revokeObjectURL(url)};
-img.onerror=function(){$('err').textContent='Please choose an image file.'};img.src=url};
-$('go').onclick=function(){$('err').textContent='';
-if(!$('doctor').value)return $('err').textContent='Please choose a doctor.';
-if(!$('date').value||!chosenTime)return $('err').textContent='Please choose a date and a time.';
-$('go').disabled=true;$('go').textContent='Booking…';
-fetch('/api/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('name').value,phone:$('phone').value,type:$('type').value,doctor:$('doctor').value,date:$('date').value,time:chosenTime,shotBase64:shotData,shotType:shotType,website:$('website').value})})
-.then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
-if(!x.ok){$('err').textContent=x.j.error||'Something went wrong.';$('go').disabled=false;$('go').textContent='Confirm booking';if(/no longer|just took/.test(x.j.error||''))loadSlots();return}
-var j=x.j;$('card').innerHTML='<div class="ok"><img class="logo" src="/clinic-logo.png" alt="Empower"><h1>Your booking is confirmed ✓</h1><p><b>Dr. '+esc(j.doctor)+'</b><br>'+esc(j.date)+' at '+esc(j.time)+'<br>'+esc(j.label)+'</p>'+(j.package?'<p class="muted">Your active package covers this visit.</p>':'<p class="muted">Deposit received: '+j.deposit+' EGP (non-refundable, deducted from your fee).</p>')+'<div class="box" style="text-align:left">📍 92 Sayed El-Merghany St., El-Montaza, Heliopolis, Cairo<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">Open the location on the map</a><br><br>Please arrive 5 minutes early. To change the time, contact the clinic on WhatsApp at least 5 hours before.</div></div>'
-}).catch(function(){$('err').textContent='Connection problem. Please try again.';$('go').disabled=false;$('go').textContent='Confirm booking'})};
+function typeObj(){return cfg.types.filter(function(x){return x.key===chosenType})[0]}
+function setStep(n){ for(var i=1;i<=3;i++)$('d'+i).className='dot'+(i<=n?' on':'') }
+function applyLang(){
+  document.documentElement.lang=lang; document.documentElement.dir=lang==='ar'?'rtl':'ltr';
+  $('langBtn').textContent=t('other'); $('title').textContent=t('title');
+  $('lName').textContent=t('lName'); $('lPhone').textContent=t('lPhone'); $('next').textContent=t('next');
+  $('hType').textContent=t('hType'); $('hDoc').textContent=t('hDoc'); $('lDate').textContent=t('lDate'); $('lOther').textContent=t('lOther'); $('lTime').textContent=t('lTime'); $('hPay').textContent=t('hPay');
+  $('go').textContent=$('go').disabled?t('booking'):t('go');
+  $('upTxt').textContent=shotData?t('upDone'):t('up');
+  if(!cfg){ $('sub').textContent=t('sub0'); } else if(!cfg.enabled){ $('sub').textContent=t('subClosed'); } else if(cfg.locked){ $('sub').textContent=t('sub1'); } else { $('sub').textContent=t('sub2'); }
+  if(cfg&&!cfg.locked&&cfg.enabled){ renderTypes(); renderDocs(); renderDays(); depText(); if(chosenDoc&&$('date').value) loadSlots(); else $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('pickDoc')+'</div>'; }
+}
+$('langBtn').onclick=function(){ lang=lang==='ar'?'en':'ar'; try{localStorage.setItem('bl',lang)}catch(e){} applyLang(); };
+function renderTypes(){ $('types').innerHTML=cfg.types.map(function(x){ return '<button type="button" class="opt'+(x.key===chosenType?' on':'')+'" data-k="'+esc(x.key)+'"><span>'+esc(x.label)+'</span><span class="pr">'+num(x.price)+' '+t('egp')+'</span></button>'; }).join('');
+  Array.prototype.forEach.call($('types').querySelectorAll('.opt'),function(b){ b.onclick=function(){ chosenType=b.dataset.k; renderTypes(); depText(); }; }); }
+function renderDocs(){ $('docs').innerHTML=cfg.doctors.map(function(d){ return '<button type="button" class="chip'+(d.id===chosenDoc?' on':'')+'" data-d="'+esc(d.id)+'">'+t('dr')+esc(d.name)+'</button>'; }).join('');
+  Array.prototype.forEach.call($('docs').querySelectorAll('.chip'),function(b){ b.onclick=function(){ chosenDoc=b.dataset.d; renderDocs(); loadSlots(); }; }); }
+function renderDays(){ var n=Math.min(cfg.max_days_ahead,14),h='',now=new Date(),cur=$('date').value;
+  for(var i=0;i<n;i++){ var d=new Date(now.getFullYear(),now.getMonth(),now.getDate()+i); if(d.getDay()===5)continue; var key=ymd(d);
+    h+='<button type="button" class="day'+(key===cur?' on':'')+'" data-y="'+key+'"><span>'+d.toLocaleDateString(lang==='ar'?'ar-EG':'en-GB',{weekday:'short'})+'</span><b>'+num(d.getDate())+'</b><span>'+d.toLocaleDateString(lang==='ar'?'ar-EG':'en-GB',{month:'short'})+'</span></button>'; }
+  $('days').innerHTML=h; Array.prototype.forEach.call($('days').querySelectorAll('.day'),function(b){ b.onclick=function(){ $('date').value=b.dataset.y; renderDays(); loadSlots(); }; }); }
+function depText(){ var x=typeObj(); if(!x){ $('depBox').innerHTML='<div class="hint">'+t('hType')+'</div>'; return; }
+  $('depBox').innerHTML='<div>'+t('dep1')+'</div><div class="big">'+num(x.deposit)+' '+t('egp')+'</div><div>'+t('dep2',{p:num(x.price)})+'</div>'+(cfg.instapay?'<div style="margin-top:10px">'+t('dep3')+'</div><div class="acct"><span>'+esc(cfg.instapay)+'</span><button type="button" class="copy" id="cpy">'+t('copy')+'</button></div>':'')+(cfg.note?'<div>'+esc(cfg.note)+'</div>':'')+'<div style="margin-top:8px">'+t('dep4')+'</div><div class="hint" style="margin-top:6px">'+t('dep5')+'</div>';
+  var c=$('cpy'); if(c)c.onclick=function(){ try{navigator.clipboard.writeText(cfg.instapay);c.textContent=t('copied')}catch(e){} }; }
+function loadSlots(){ chosenTime=''; var dt=$('date').value;
+  if(!chosenDoc||!dt){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('pickDoc')+'</div>'; return; }
+  $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('loading')+'</div>';
+  fetch('/api/book/slots?doctor='+encodeURIComponent(chosenDoc)+'&date='+dt+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(j){
+    if(!j.times||!j.times.length){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('noTimes')+'</div>'; return; }
+    $('slots').innerHTML=j.times.map(function(x){return '<button type="button" class="slot" data-t="'+x+'">'+fmtTime(x)+'</button>'}).join('');
+    Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(b){ b.onclick=function(){ chosenTime=b.dataset.t; Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(x){x.classList.toggle('on',x===b)}); }; });
+  }).catch(function(){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('timesFail')+'</div>'; }); }
+function init(){ applyLang(); fetch('/api/book/config').then(function(r){return r.json()}).then(function(c){ cfg=c; if(!c.enabled){ applyLang(); return; } $('step1').style.display='block'; applyLang(); }).catch(function(){ $('sub').textContent=t('eNA'); }); }
+$('next').onclick=function(){ $('err1').textContent='';
+  if($('name').value.trim().length<3) return $('err1').textContent=t('eName');
+  if($('phone').value.replace(/\D/g,'').length<10) return $('err1').textContent=t('ePhone');
+  $('next').disabled=true;
+  fetch('/api/book/config?name='+encodeURIComponent($('name').value.trim())+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(c){
+    if(!c.enabled||c.locked){ $('err1').textContent=t('eNA'); $('next').disabled=false; return; }
+    cfg=c; chosenType=c.types.length===1?c.types[0].key:''; $('step1').style.display='none'; $('form').style.display='block'; setStep(2); applyLang(); window.scrollTo(0,0);
+  }).catch(function(){ $('err1').textContent=t('eConn'); $('next').disabled=false; }); };
+$('date').onchange=function(){ renderDays(); loadSlots(); };
+$('shot').onchange=function(){ var f=this.files[0]; shotData=null; $('prev').style.display='none'; $('upTxt').textContent=t('up'); if(!f)return;
+  var img=new Image(),url=URL.createObjectURL(f); img.onload=function(){ var s=Math.min(1,1400/Math.max(img.width,img.height)),cv=document.createElement('canvas'); cv.width=Math.round(img.width*s); cv.height=Math.round(img.height*s); cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
+    var u=cv.toDataURL('image/jpeg',0.82); shotData=u.split(',')[1]; shotType='image/jpeg'; $('prev').src=u; $('prev').style.display='block'; $('upTxt').textContent=t('upDone'); URL.revokeObjectURL(url); setStep(3); };
+  img.onerror=function(){ $('err').textContent=t('eImg'); }; img.src=url; };
+$('go').onclick=function(){ $('err').textContent='';
+  if(!chosenType) return $('err').textContent=srv('Please choose a visit type and a doctor.');
+  if(!chosenDoc) return $('err').textContent=t('eDoc');
+  if(!$('date').value||!chosenTime) return $('err').textContent=t('eTime');
+  $('go').disabled=true; $('go').textContent=t('booking');
+  fetch('/api/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('name').value,phone:$('phone').value,type:chosenType,doctor:chosenDoc,date:$('date').value,time:chosenTime,shotBase64:shotData,shotType:shotType,website:$('website').value})})
+  .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
+    if(!x.ok){ $('err').textContent=srv(x.j.error||'Something went wrong. Please try again.'); $('go').disabled=false; $('go').textContent=t('go'); if(/no longer|just took/.test(x.j.error||''))loadSlots(); return; }
+    var j=x.j; var dd=new Date(j.date+'T12:00:00'); var dtxt=dd.toLocaleDateString(lang==='ar'?'ar-EG':'en-GB',{weekday:'long',day:'numeric',month:'long'});
+    $('app').innerHTML='<div class="top"><span></span><button type="button" class="lang" id="langBtn2">'+t('other')+'</button></div><img class="logo" src="/clinic-logo.png" alt="Empower"><div class="card ok"><div class="check">✓</div><h1>'+t('done')+'</h1><div class="sum">'+t('dr')+esc(j.doctor)+'<br>'+esc(dtxt)+' '+t('at')+' '+fmtTime(j.time)+'<br>'+esc(j.label)+'</div><div class="hint">'+(j.package?t('pkg'):t('depRec',{d:num(j.deposit)}))+'</div></div><div class="where">📍 '+t('addr')+'<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">'+t('map')+'</a><br><br>'+t('arrive')+'</div>';
+    $('langBtn2').onclick=function(){ lang=lang==='ar'?'en':'ar'; try{localStorage.setItem('bl',lang)}catch(e){} location.reload(); };
+  }).catch(function(){ $('err').textContent=t('eConn'); $('go').disabled=false; $('go').textContent=t('go'); }); };
 init();
-</script></body></html>`;
+</script></body></html>
+`;
 app.get('/book', (req, res) => {
   logActivity(req, 'page', null, 'book');
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(BOOK_PAGE);
