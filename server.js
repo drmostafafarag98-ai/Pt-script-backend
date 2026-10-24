@@ -4533,6 +4533,7 @@ var SRV={'Booking is not available right now.':['eNA'],'Please enter your full n
  'This doctor is not available for your booking. Please choose another doctor.':'الدكتور ده مش متاح لحجزك. اختار دكتور تاني.',
  'This doctor does not take check-ups. Please choose another doctor.':'الدكتور ده مش بياخد كشوفات. اختار دكتور تاني.'};
 function $(i){return document.getElementById(i)}
+function dname(n){ n=String(n||'').replace(/^\s*(dr\.?|doctor|د\.?|دكتور|دكتورة)\s+/i,'').replace(/^\s*(dr\.?)\s+/i,'').trim(); n=n.replace(/\S+/g,function(w){ return w.charAt(0).toUpperCase()+w.slice(1).toLowerCase(); }); return 'Dr. '+n; }
 function t(k,r){var s=(T[lang]||T.en)[k]; if(s===undefined)s=T.en[k]||''; if(r){for(var x in r)s=s.replace('{'+x+'}',r[x])} return s}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function srv(m){ if(lang==='en')return m; var v=SRV[m]; if(!v)return m; return typeof v==='string'?v:t(v[0]); }
@@ -4558,7 +4559,7 @@ function renderTypes(){ $('types').innerHTML=cfg.types.map(function(x){ return '
 function docList(){ var x=typeObj(); return cfg.doctors.filter(function(d){ return !(x&&x.visit_type==='checkup'&&d.checkups===false); }); }
 function renderDocs(){ var L=docList(); if(chosenDoc&&!L.some(function(d){return d.id===chosenDoc})){ chosenDoc=''; loadSlots(); }
   if(!L.length){ $('docs').innerHTML='<div class="hint">'+t('noDocs')+'</div>'; return; }
-  $('docs').innerHTML=L.map(function(d){ return '<button type="button" class="chip'+(d.id===chosenDoc?' on':'')+'" data-d="'+esc(d.id)+'">'+t('dr')+esc(d.name)+'</button>'; }).join('');
+  $('docs').innerHTML=L.map(function(d){ return '<button type="button" class="chip'+(d.id===chosenDoc?' on':'')+'" data-d="'+esc(d.id)+'">'+esc(dname(d.name))+'</button>'; }).join('');
   Array.prototype.forEach.call($('docs').querySelectorAll('.chip'),function(b){ b.onclick=function(){ chosenDoc=b.dataset.d; renderDocs(); loadSlots(); }; }); }
 function renderDays(){ var n=Math.min(cfg.max_days_ahead,14),h='',now=new Date(),cur=$('date').value;
   for(var i=0;i<n;i++){ var d=new Date(now.getFullYear(),now.getMonth(),now.getDate()+i); if(d.getDay()===5)continue; var key=ymd(d);
@@ -4600,7 +4601,7 @@ $('go').onclick=function(){ $('err').textContent='';
   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
     if(!x.ok){ $('err').textContent=srv(x.j.error||'Something went wrong. Please try again.'); $('go').disabled=false; $('go').textContent=t('go'); if(/no longer|just took/.test(x.j.error||''))loadSlots(); return; }
     var j=x.j; var dd=new Date(j.date+'T12:00:00'); var dtxt=dd.toLocaleDateString(lang==='ar'?'ar-EG':'en-GB',{weekday:'long',day:'numeric',month:'long'});
-    $('app').innerHTML='<div class="top"><span></span><button type="button" class="lang" id="langBtn2">'+t('other')+'</button></div><img class="logo" src="/clinic-logo.png" alt="Empower"><div class="card ok"><div class="check">✓</div><h1>'+t('done')+'</h1><div class="sum">'+t('dr')+esc(j.doctor)+'<br>'+esc(dtxt)+' '+t('at')+' '+fmtTime(j.time)+'<br>'+esc(tLabel(typeObj()||{label:j.label}))+'</div><div class="hint">'+(j.package?t('pkg'):t('depRec',{d:num(j.deposit)}))+'</div></div><div class="where">📍 '+t('addr')+'<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">'+t('map')+'</a><br><br>'+t('arrive')+'</div>';
+    $('app').innerHTML='<div class="top"><span></span><button type="button" class="lang" id="langBtn2">'+t('other')+'</button></div><img class="logo" src="/clinic-logo.png" alt="Empower"><div class="card ok"><div class="check">✓</div><h1>'+t('done')+'</h1><div class="sum">'+esc(dname(j.doctor))+'<br>'+esc(dtxt)+' '+t('at')+' '+fmtTime(j.time)+'<br>'+esc(tLabel(typeObj()||{label:j.label}))+'</div><div class="hint">'+(j.package?t('pkg'):t('depRec',{d:num(j.deposit)}))+'</div></div><div class="where">📍 '+t('addr')+'<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">'+t('map')+'</a><br><br>'+t('arrive')+'</div>';
     $('langBtn2').onclick=function(){ lang=lang==='ar'?'en':'ar'; try{localStorage.setItem('bl',lang)}catch(e){} location.reload(); };
   }).catch(function(){ $('err').textContent=t('eConn'); $('go').disabled=false; $('go').textContent=t('go'); }); };
 init();
