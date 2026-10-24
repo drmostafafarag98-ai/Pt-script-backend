@@ -4376,7 +4376,7 @@ app.get('/api/login-log', requireOwnerDoctor, async (req, res) => {
     res.json(rows);
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
-app.get('/api/booking/leads', requireOwnerDoctor, async (req, res) => {
+app.get('/api/booking/leads', requireOwnerOrSecretary, async (req, res) => {
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_leads?completed=eq.false&order=last_seen.desc&limit=100`, { headers: bookHeaders() });
     const rows = await r.json();
@@ -4384,14 +4384,14 @@ app.get('/api/booking/leads', requireOwnerDoctor, async (req, res) => {
     res.json(rows);
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
-app.delete('/api/booking/leads/:id', requireOwnerDoctor, async (req, res) => {
+app.delete('/api/booking/leads/:id', requireOwnerOrSecretary, async (req, res) => {
   try {
     await fetch(`${SUPABASE_URL}/rest/v1/booking_leads?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'DELETE', headers: bookHeaders() });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
-app.get('/api/booking/deposits', requireOwnerDoctor, async (req, res) => {
+app.get('/api/booking/deposits', requireOwnerOrSecretary, async (req, res) => {
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_deposits?order=created_at.desc&limit=150`, { headers: bookHeaders() });
     const rows = await r.json();
@@ -4400,7 +4400,7 @@ app.get('/api/booking/deposits', requireOwnerDoctor, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
-app.get('/api/booking/deposits/:id/shot', requireOwnerDoctor, async (req, res) => {
+app.get('/api/booking/deposits/:id/shot', requireOwnerOrSecretary, async (req, res) => {
   try {
     const rows = await (await fetch(`${SUPABASE_URL}/rest/v1/booking_deposits?id=eq.${encodeURIComponent(req.params.id)}&select=screenshot_path&limit=1`, { headers: bookHeaders() })).json();
     const p = rows && rows[0] && rows[0].screenshot_path;
@@ -4412,7 +4412,7 @@ app.get('/api/booking/deposits/:id/shot', requireOwnerDoctor, async (req, res) =
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
-app.post('/api/booking/deposits/:id/review', requireOwnerDoctor, async (req, res) => {
+app.post('/api/booking/deposits/:id/review', requireOwnerOrSecretary, async (req, res) => {
   const status = req.body && req.body.status;
   if (!['ok', 'rejected'].includes(status)) return res.status(400).json({ error: 'Bad status.' });
   try {
@@ -4433,7 +4433,7 @@ const BOOK_PAGE = String.raw`<!doctype html><html lang="ar" dir="rtl"><head><met
 :root{--ink:#12363a;--muted:#667570;--gold:#b07a1f;--bg:#f7f8f6;--line:#e6e9e4;--soft:#eef4f2;--tint:#fbf5e6}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html{font-size:18px}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:'Cairo',-apple-system,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.55;padding:0 0 40px}
+html{overflow-x:hidden}body{overflow-x:hidden;margin:0;background:var(--bg);color:var(--ink);font-family:'Cairo',-apple-system,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.55;padding:0 0 40px}
 .wrap{max-width:520px;margin:0 auto;padding:18px 16px}
 .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
 .lang{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:6px 16px;font:600 .8rem 'Cairo',sans-serif;cursor:pointer}
@@ -4473,7 +4473,7 @@ input:focus{border-color:var(--gold)}
 button.go{width:100%;margin-top:6px;padding:16px;border:0;border-radius:14px;background:var(--ink);color:#fff;font:700 1.05rem 'Cairo',sans-serif;cursor:pointer}
 button.go:disabled{opacity:.5}
 .err{color:#b3261e;font-size:.88rem;min-height:1.3em;margin:8px 0 0}
-.hp{position:absolute;left:-9999px;opacity:0}
+.hp{position:absolute;top:0;left:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none}
 .ok{text-align:center}.ok .check{width:64px;height:64px;border-radius:50%;background:#e4f4ea;color:#1b7a4a;display:flex;align-items:center;justify-content:center;font-size:2rem;margin:6px auto 10px}
 .ok h1{color:#1b7a4a}.sum{background:var(--soft);border-radius:14px;padding:14px;margin:14px 0;font-weight:600}
 .where{background:#fff;border-radius:14px;padding:14px;font-size:.88rem;text-align:start;box-shadow:0 2px 14px rgba(18,54,58,.06)}
