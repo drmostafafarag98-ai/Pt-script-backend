@@ -4608,6 +4608,24 @@ $('go').onclick=function(){ $('err').textContent='';
 init();
 </script></body></html>
 `;
+app.get('/b', (req, res) => { res.redirect(302, '/book'); });
+
+app.get('/api/booking/stats', requireOwnerOrSecretary, async (req, res) => {
+  try {
+    const get = async (path) => { const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers: bookHeaders() }); const j = await r.json(); return Array.isArray(j) ? j : []; };
+    const [opens, leads, deps] = await Promise.all([
+      get('login_log?event=eq.page&detail=eq.book&select=created_at&order=created_at.desc&limit=20000'),
+      get('booking_leads?select=created_at&order=created_at.desc&limit=20000'),
+      get('booking_deposits?select=created_at&order=created_at.desc&limit=20000'),
+    ]);
+    const now = Date.now(), cairoDay = cairoTodayYmd();
+    const sameCairoDay = (iso) => new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }) === cairoDay;
+    const within = (iso, days) => now - new Date(iso).getTime() < days * 86400000;
+    const pack = (rows) => ({ today: rows.filter(r => sameCairoDay(r.created_at)).length, d7: rows.filter(r => within(r.created_at, 7)).length, d30: rows.filter(r => within(r.created_at, 30)).length, total: rows.length });
+    res.json({ opens: pack(opens), started: pack(leads), booked: pack(deps) });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
 app.get('/book', (req, res) => {
   logActivity(req, 'page', null, 'book');
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(BOOK_PAGE);
