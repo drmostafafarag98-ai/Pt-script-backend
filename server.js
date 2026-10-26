@@ -565,20 +565,14 @@ app.get('/api/doctor-unavailability', requireApprovedAny, async (req, res) => {
 // - Marwa: 50% of her own collected revenue (not a partner, no profit share).
 // Matching a doctor_name to a rule is done by a lowercase keyword so small
 // spelling variations in doctor_name still resolve correctly.
-const PAYROLL_RULES = [
-  { keyword: 'mostafa', kind: 'partner', label: 'Dr. Mostafa Farag' },
-  { keyword: 'youssef', kind: 'partner', label: 'Dr. Youssef' },
-  { keyword: 'omnia', kind: 'partner', label: 'Dr. Omnia Ahmed' },
-  { keyword: 'zeinab', kind: 'fixed_plus_rate', fixed: 3500, rate: 75, label: 'Dr. Zeinab' },
-  { keyword: 'menna', kind: 'fixed_plus_rate', fixed: 4000, rate: 50, label: 'Dr. Menna Azzam' },
-  { keyword: 'marwa', kind: 'revenue_share', label: 'Dr. Marwa' },
-];
+let PAYROLL_RULES = []; // loaded from the clinic settings (owner edits them in Settings > Clinic)
 function matchPayrollRule(doctorName) {
   const lower = (doctorName || '').toLowerCase();
   return PAYROLL_RULES.find((r) => lower.includes(r.keyword)) || null;
 }
 
 app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
+  await getClinicConfig();
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
   const { start, end } = req.query;
   if (!start || !end) return res.status(400).json({ error: 'Missing start or end.' });
@@ -642,11 +636,11 @@ app.get('/api/payroll', requireOwnerDoctor, async (req, res) => {
       let basePay = 0;
       let formula = '';
       if (rule.kind === 'partner') {
-        basePay = revenue * 0.5;
-        formula = '50% of own revenue + equal share of net profit';
+        basePay = revenue * (rule.share != null ? rule.share : 0.5);
+        formula = Math.round((rule.share != null ? rule.share : 0.5) * 100) + '% of own revenue + equal share of net profit';
       } else if (rule.kind === 'revenue_share') {
-        basePay = revenue * 0.5;
-        formula = '50% of own revenue';
+        basePay = revenue * (rule.share != null ? rule.share : 0.5);
+        formula = Math.round((rule.share != null ? rule.share : 0.5) * 100) + '% of own revenue';
       } else if (rule.kind === 'fixed_plus_rate') {
         basePay = rule.fixed + rule.rate * sessionCount;
         formula = `Fixed ${rule.fixed} + ${rule.rate}/session × ${sessionCount} sessions`;
@@ -1711,11 +1705,12 @@ const CLINIC_LOGO_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAArwAAACgCAIAAABhUyj
 app.get('/clinic-logo.png', (req, res) => res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' }).send(CLINIC_LOGO_PNG));
 
 app.get(['/e/:token', '/p/:token', '/empower/:token'], async (req, res) => {
+  const CL = await getClinicConfig();
   const page = (body, status) => res.status(status || 200).set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(
-    `<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Empower Physiotherapy – My Package</title>` +
+    `<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${clinicEsc(CL.name)} – My Package</title>` +
     `<style>body{margin:0;background:#f6f4ee;color:#12363a;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;padding:20px}.c{max-width:420px;margin:24px auto;background:#fff;border:1px solid #dad6ca;border-radius:18px;padding:26px;text-align:center}` +
     `.brand{font-size:.78rem;letter-spacing:.14em;text-transform:uppercase;color:#b07a1f;font-weight:700;margin-bottom:10px}h1{font-size:1.15rem;margin:0 0 4px}.big{font-size:3.2rem;font-weight:800;color:#12363a;line-height:1.1;margin:14px 0 2px}.sub{color:#5c7478;font-size:.9rem}.bar{height:12px;background:#e7e3d8;border-radius:99px;overflow:hidden;margin:16px 0}.bar i{display:block;height:100%;background:#e8a33d}` +
-    `.row{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid #eee;font-size:.95rem}.due{color:#b3261e;font-weight:700}.ok{color:#1b8a4a;font-weight:700}.f{margin-top:18px;font-size:.8rem;color:#8a938e}</style></head><body><div class="c"><img src="/clinic-logo.png" alt="Empower Physiotherapy" style="max-width:240px;width:80%;height:auto;display:block;margin:0 auto 14px">${body}</div></body></html>`);
+    `.row{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid #eee;font-size:.95rem}.due{color:#b3261e;font-weight:700}.ok{color:#1b8a4a;font-weight:700}.f{margin-top:18px;font-size:.8rem;color:#8a938e}</style></head><body><div class="c"><img src="/clinic-logo.png" alt="${clinicEsc(CL.name)}" style="max-width:240px;width:80%;height:auto;display:block;margin:0 auto 14px">${body}</div></body></html>`);
   const bad = '<h1>Link not valid</h1><div class="sub">Please check the link or contact the clinic.</div>';
   const token = String(req.params.token || '');
   if (!/^[a-z0-9]{8,24}$/.test(token) || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) return page(bad, 404);
@@ -1753,7 +1748,7 @@ app.get(['/e/:token', '/p/:token', '/empower/:token'], async (req, res) => {
     } else if (startYmd) {
       // no standard validity for this package size
     }
-    const clinicPhone = process.env.CLINIC_PHONE || '01507119559';
+    const clinicPhone = process.env.CLINIC_PHONE || CL.phone || '';
     page(`<h1>Hello ${esc(p.patient_name)} 🌷</h1><div class="sub">Your package status</div>` +
       (left > 0 ? `<div class="big">${left}</div><div class="sub">${left === 1 ? 'session' : 'sessions'} remaining out of ${total}</div>` : `<div class="big" style="font-size:1.6rem">Package completed ✓</div><div class="sub">You used ${total} of ${total} sessions</div>`) +
       `<div class="bar"><i style="width:${pct}%"></i></div><div class="row"><span>Sessions used</span><span>${used} of ${total}</span></div>${timing}${money}` +
@@ -3516,7 +3511,7 @@ app.post('/api/telegram/test/:email', requireOwnerOrPermission('manage_team'), a
     const rows = await r.json();
     const doc = Array.isArray(rows) && rows[0];
     if (!doc || !doc.telegram_chat_id) return res.status(400).json({ error: 'This doctor has not linked Telegram yet.' });
-    await telegramSend(doc.telegram_chat_id, '✅ رسالة تجربة من عيادة Empower — تنبيهات وصول العيانين شغّالة.');
+    await telegramSend(doc.telegram_chat_id, '✅ رسالة تجربة من عيادة ' + (await getClinicConfig()).name + ' — تنبيهات وصول العيانين شغّالة.');
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Could not send the test message: ' + err.message });
@@ -3827,9 +3822,9 @@ button:disabled{opacity:.6}.err{color:#b3261e;font-size:.85rem;margin-top:10px;m
 })();
 </script></body></html>`;
 
-app.get('/apply', (req, res) => {
+app.get('/apply', async (req, res) => {
   logActivity(req, 'page', null, 'apply');
-  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(APPLY_PAGE);
+  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(renderClinicPage(APPLY_PAGE, await getClinicConfig()));
 });
 
 app.post('/api/apply', async (req, res) => {
@@ -4124,6 +4119,73 @@ function bookRateLimited(ip, kind, max, windowMs) {
   arr.push(now); bookHits.set(k, arr); return false;
 }
 const bookHeaders = () => ({ apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` });
+// ---- Clinic settings (name, address, links, message texts, payroll rules) ----
+// Stored in booking_settings row id=2 so no new table is needed. Every clinic
+// that installs the app fills these in from Settings > Clinic.
+const CLINIC_DEFAULTS = { name: 'Your Clinic', name_ar: '', address: '', address_ar: '', map_url: '', phone: '', instapay_url: '', instapay_handle: '', review_url: '', intake_url: '', templates: {}, payroll_rules: [] };
+let clinicCache = null, clinicCacheAt = 0;
+async function getClinicConfig(force) {
+  if (!force && clinicCache && Date.now() - clinicCacheAt < 60000) return clinicCache;
+  let data = {};
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?id=eq.2&select=data&limit=1`, { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
+    const rows = await r.json();
+    if (Array.isArray(rows) && rows[0] && rows[0].data) data = rows[0].data;
+  } catch (e) { if (clinicCache) return clinicCache; }
+  const c = { ...CLINIC_DEFAULTS, ...data };
+  c.templates = data.templates && typeof data.templates === 'object' ? data.templates : {};
+  c.payroll_rules = Array.isArray(data.payroll_rules) ? data.payroll_rules : [];
+  if (!String(c.name || '').trim()) c.name = CLINIC_DEFAULTS.name;
+  clinicCache = c; clinicCacheAt = Date.now();
+  PAYROLL_RULES = c.payroll_rules;
+  return c;
+}
+const clinicEsc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const clinicJs = (v) => JSON.stringify(String(v == null ? '' : v)).slice(1, -1).replace(/</g, '\\u003c').replace(/'/g, "\\'");
+function renderClinicPage(html, c) {
+  return html.replace(/__ADDR_EN__/g, clinicJs(clinicEsc(c.address))).replace(/__ADDR_AR__/g, clinicJs(clinicEsc(c.address_ar || c.address)))
+    .replace(/__MAP_URL__/g, clinicEsc(c.map_url || '#')).replace(/Empower/g, clinicEsc(c.name));
+}
+const clinicText = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u0009\u000b-\u001f]/g, ' ').slice(0, n);
+app.get('/api/clinic-config', requireApprovedAny, async (req, res) => {
+  try {
+    const c = await getClinicConfig(true);
+    const out = { ...c };
+    if (!req.doctor || (req.doctor.role !== 'owner' && !(req.doctor.permissions && req.doctor.permissions.view_payroll))) { delete out.payroll_rules; }
+    res.json(out);
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+app.put('/api/clinic-config', requireOwnerDoctor, async (req, res) => {
+  const b = req.body || {};
+  const num = (v, lo, hi) => { const n = parseFloat(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : null; };
+  const rules = (Array.isArray(b.payroll_rules) ? b.payroll_rules : []).slice(0, 40).map((r) => {
+    const kind = ['partner', 'revenue_share', 'fixed_plus_rate'].includes(r.kind) ? r.kind : null;
+    const keyword = clinicText(r.keyword, 40).trim().toLowerCase(); const label = clinicText(r.label, 60).trim();
+    if (!kind || !keyword || !label) return null;
+    const out = { keyword, kind, label };
+    if (kind === 'fixed_plus_rate') { out.fixed = num(r.fixed, 0, 10000000) || 0; out.rate = num(r.rate, 0, 1000000) || 0; }
+    else { const sh = num(r.share, 0, 1); if (sh != null) out.share = sh; }
+    return out;
+  }).filter(Boolean);
+  const templates = {};
+  for (const k of ['confirmation', 'elevator', 'package_policy', 'recovery_session_policy', 'instapay_payment', 'intake_form', 'package_last_session']) {
+    const t = clinicText(b.templates && b.templates[k], 4000).trim();
+    if (t) templates[k] = t;
+  }
+  const data = {
+    name: clinicText(b.name, 80).trim() || CLINIC_DEFAULTS.name, name_ar: clinicText(b.name_ar, 80).trim(),
+    address: clinicText(b.address, 200).trim(), address_ar: clinicText(b.address_ar, 200).trim(), map_url: clinicText(b.map_url, 300).trim(),
+    phone: clinicText(b.phone, 30).trim(), instapay_url: clinicText(b.instapay_url, 300).trim(), instapay_handle: clinicText(b.instapay_handle, 100).trim(),
+    review_url: clinicText(b.review_url, 300).trim(), intake_url: clinicText(b.intake_url, 300).trim(), templates, payroll_rules: rules,
+  };
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?on_conflict=id`, { method: 'POST', headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ id: 2, data, updated_at: new Date().toISOString() }) });
+    if (!r.ok) { console.error('clinic config save failed', r.status, await r.text().catch(() => '')); return res.status(500).json({ error: 'Could not save.' }); }
+    await getClinicConfig(true);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
 const bookClean = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n);
 
 async function getBookingSettings() {
@@ -4512,11 +4574,11 @@ var T={
  en:{title:'Book an appointment',sub0:'Loading…',subClosed:'Online booking is not open right now. Please contact the clinic on WhatsApp.',sub1:'Enter your details to start.',sub2:'Choose your visit, doctor and time.',lName:'Full name',lPhone:'Phone number (WhatsApp)',lGender:'Gender',gMale:'Male',gFemale:'Female',eGender:'Please choose your gender.',noDocs:'No doctors are available for this visit type.',next:'Continue',hType:'1. Visit type',hDoc:'2. Doctor & time',lDate:'Day',lOther:'Or pick another date',lTime:'Available times',hPay:'3. Deposit to confirm',go:'Confirm booking',booking:'Booking…',pickDoc:'Choose a doctor and a day to see times.',loading:'Loading…',noTimes:'No available times that day. Try another day.',timesFail:'Could not load times.',
   dep1:'Deposit',dep2:'half of the fee ({p} EGP). It is non-refundable and is deducted from your fee at the clinic.',dep3:'Transfer by InstaPay to:',copy:'Copy',openpay:'Open InstaPay link',copied:'Copied ✓',dep4:'Then upload the transfer screenshot below.',dep5:'Have an active package with us? Skip the screenshot — no deposit needed.',up:'Tap to upload the transfer screenshot',upDone:'Tap to change the screenshot',
   eName:'Please enter your full name.',ePhone:'Please enter a valid phone number.',eDoc:'Please choose a doctor.',eTime:'Please choose a day and a time.',eImg:'Please choose an image file.',eConn:'Connection problem. Please try again.',eNA:'Booking is not available right now.',
-  done:'Your booking is confirmed',pkg:'Your active package covers this visit.',depRec:'Deposit received: {d} EGP (non-refundable, deducted from your fee).',addr:'92 Sayed El-Merghany St., El-Montaza, Heliopolis, Cairo',map:'Open the location on the map',arrive:'Please arrive 5 minutes early. To change the time, contact the clinic on WhatsApp at least 5 hours before.',dr:'Dr. ',egp:'EGP',at:'at',other:'العربية'},
+  done:'Your booking is confirmed',pkg:'Your active package covers this visit.',depRec:'Deposit received: {d} EGP (non-refundable, deducted from your fee).',addr:'__ADDR_EN__',map:'Open the location on the map',arrive:'Please arrive 5 minutes early. To change the time, contact the clinic on WhatsApp at least 5 hours before.',dr:'Dr. ',egp:'EGP',at:'at',other:'العربية'},
  ar:{title:'احجز ميعادك',sub0:'جاري التحميل…',subClosed:'الحجز الأونلاين مقفول دلوقتي. من فضلك كلّم العيادة على واتساب.',sub1:'اكتب بياناتك عشان تبدأ.',sub2:'اختار نوع الزيارة والدكتور والميعاد.',lName:'الاسم بالكامل',lPhone:'رقم التليفون (واتساب)',lGender:'النوع',gMale:'ذكر',gFemale:'أنثى',eGender:'من فضلك اختار النوع.',noDocs:'مفيش دكاترة متاحين لنوع الزيارة ده.',next:'متابعة',hType:'١. نوع الزيارة',hDoc:'٢. الدكتور والميعاد',lDate:'اليوم',lOther:'أو اختار تاريخ تاني',lTime:'المواعيد المتاحة',hPay:'٣. العربون لتأكيد الحجز',go:'تأكيد الحجز',booking:'جاري الحجز…',pickDoc:'اختار الدكتور واليوم عشان تشوف المواعيد.',loading:'جاري التحميل…',noTimes:'مفيش مواعيد متاحة اليوم ده. جرّب يوم تاني.',timesFail:'مقدرناش نحمّل المواعيد.',
   dep1:'العربون',dep2:'نص السعر ({p} جنيه). العربون غير مسترد ويتخصم من الحساب في العيادة.',dep3:'حوّل بـ InstaPay على:',openpay:'افتح لينك InstaPay',copy:'نسخ',copied:'تم النسخ ✓',dep4:'وبعدين ارفع صورة التحويل تحت.',dep5:'عندك باكدج شغال معانا؟ سيب صورة التحويل فاضية، مش محتاج عربون.',up:'اضغط لرفع صورة التحويل',upDone:'اضغط لتغيير الصورة',
   eName:'من فضلك اكتب اسمك بالكامل.',ePhone:'من فضلك اكتب رقم تليفون صحيح.',eDoc:'من فضلك اختار الدكتور.',eTime:'من فضلك اختار اليوم والميعاد.',eImg:'من فضلك اختار ملف صورة.',eConn:'فيه مشكلة في الاتصال. جرّب تاني.',eNA:'الحجز مش متاح دلوقتي.',
-  done:'تم تأكيد حجزك',pkg:'الباكدج بتاعك بيغطي الزيارة دي.',depRec:'تم استلام العربون: {d} جنيه (غير مسترد ويتخصم من الحساب).',addr:'٩٢ شارع سيد المرغني، المنتزه، مصر الجديدة، القاهرة',map:'افتح الموقع على الخريطة',arrive:'من فضلك تعالى قبل الميعاد بـ 5 دقايق. لو عايز تغيّر الميعاد كلّم العيادة على واتساب قبلها بـ 5 ساعات على الأقل.',dr:'Dr. ',egp:'جنيه',at:'الساعة',other:'EN'}
+  done:'تم تأكيد حجزك',pkg:'الباكدج بتاعك بيغطي الزيارة دي.',depRec:'تم استلام العربون: {d} جنيه (غير مسترد ويتخصم من الحساب).',addr:'__ADDR_AR__',map:'افتح الموقع على الخريطة',arrive:'من فضلك تعالى قبل الميعاد بـ 5 دقايق. لو عايز تغيّر الميعاد كلّم العيادة على واتساب قبلها بـ 5 ساعات على الأقل.',dr:'Dr. ',egp:'جنيه',at:'الساعة',other:'EN'}
 };
 var SRV={'Booking is not available right now.':['eNA'],'Please enter your full name and a valid phone number.':['eName'],
  'Sorry, that time is no longer available. Please pick another one.':'عذراً، الميعاد ده اتحجز. اختار ميعاد تاني.',
@@ -4602,7 +4664,7 @@ $('go').onclick=function(){ $('err').textContent='';
   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
     if(!x.ok){ $('err').textContent=srv(x.j.error||'Something went wrong. Please try again.'); $('go').disabled=false; $('go').textContent=t('go'); if(/no longer|just took/.test(x.j.error||''))loadSlots(); return; }
     var j=x.j; var dd=new Date(j.date+'T12:00:00'); var dtxt=dd.toLocaleDateString(lang==='ar'?'ar-EG':'en-GB',{weekday:'long',day:'numeric',month:'long'});
-    $('app').innerHTML='<div class="top"><span></span><button type="button" class="lang" id="langBtn2">'+t('other')+'</button></div><img class="logo" src="/clinic-logo.png" alt="Empower"><div class="card ok"><div class="check">✓</div><h1>'+t('done')+'</h1><div class="sum">'+esc(dname(j.doctor))+'<br>'+esc(dtxt)+' '+t('at')+' '+fmtTime(j.time)+'<br>'+esc(tLabel(typeObj()||{label:j.label}))+'</div><div class="hint">'+(j.package?t('pkg'):t('depRec',{d:num(j.deposit)}))+'</div></div><div class="where">📍 '+t('addr')+'<br><a href="https://maps.app.goo.gl/aWorsBEvduGweSLw5">'+t('map')+'</a><br><br>'+t('arrive')+'</div>';
+    $('app').innerHTML='<div class="top"><span></span><button type="button" class="lang" id="langBtn2">'+t('other')+'</button></div><img class="logo" src="/clinic-logo.png" alt="Empower"><div class="card ok"><div class="check">✓</div><h1>'+t('done')+'</h1><div class="sum">'+esc(dname(j.doctor))+'<br>'+esc(dtxt)+' '+t('at')+' '+fmtTime(j.time)+'<br>'+esc(tLabel(typeObj()||{label:j.label}))+'</div><div class="hint">'+(j.package?t('pkg'):t('depRec',{d:num(j.deposit)}))+'</div></div><div class="where">📍 '+t('addr')+'<br><a href="__MAP_URL__">'+t('map')+'</a><br><br>'+t('arrive')+'</div>';
     $('langBtn2').onclick=function(){ lang=lang==='ar'?'en':'ar'; try{localStorage.setItem('bl',lang)}catch(e){} location.reload(); };
   }).catch(function(){ $('err').textContent=t('eConn'); $('go').disabled=false; $('go').textContent=t('go'); }); };
 init();
@@ -4626,9 +4688,9 @@ app.get('/api/booking/stats', requireOwnerOrSecretary, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
 
-app.get('/book', (req, res) => {
+app.get('/book', async (req, res) => {
   logActivity(req, 'page', null, 'book');
-  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(BOOK_PAGE);
+  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(renderClinicPage(BOOK_PAGE, await getClinicConfig()));
 });
 
 app.listen(PORT, () => {
