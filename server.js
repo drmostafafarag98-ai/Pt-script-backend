@@ -27,7 +27,14 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const OWNER_SECRET = process.env.OWNER_SECRET || '';
 
-app.use(cors({ origin: ALLOWED_ORIGIN }));
+const ALLOWED_ORIGIN_LIST = ALLOWED_ORIGIN.split(',').map(x => x.trim()).filter(Boolean);
+app.use(cors({
+  origin: ALLOWED_ORIGIN_LIST.includes('*') ? '*' : function (origin, cb) {
+    // no Origin header (curl, server-to-server) or a listed origin -> allow
+    if (!origin || ALLOWED_ORIGIN_LIST.includes(origin)) return cb(null, true);
+    return cb(null, false);
+  }
+}));
 app.use(express.json({ limit: '20mb' }));
 
 // Our own long-lived session tokens, stored in a Supabase table
@@ -4691,6 +4698,182 @@ app.get('/api/booking/stats', requireOwnerOrSecretary, async (req, res) => {
 app.get('/book', async (req, res) => {
   logActivity(req, 'page', null, 'book');
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(renderClinicPage(BOOK_PAGE, await getClinicConfig()));
+});
+
+const INTAKE_PAGE = String.raw`<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>استمارة استقبال — __CLINIC_AR__</title><meta name="robots" content="noindex,nofollow">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600;700&family=Aref+Ruqaa:wght@700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#1b2b2b;
+    --paper:#f6f7f5;
+    --panel:#ffffff;
+    --line:#dfe3df;
+    --maroon:#1f5c56;
+    --maroon-deep:#123f3a;
+    --gold:#b8894f;
+    --radius:12px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Noto Naskh Arabic",serif;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    min-height:100vh;
+    padding:20px;
+  }
+  .card{
+    background:var(--panel);
+    border:2px solid var(--gold);
+    border-radius:var(--radius);
+    max-width:420px;
+    width:100%;
+    padding:28px 24px;
+  }
+  .logo{
+    font-family:'Aref Ruqaa',serif;
+    font-weight:700;
+    font-size:2.2rem;
+    color:var(--maroon);
+    text-align:center;
+    margin-bottom:4px;
+  }
+  .tag{
+    text-align:center;
+    color:#5b6863;
+    font-size:0.9rem;
+    margin-bottom:20px;
+  }
+  label{
+    display:block;
+    font-size:0.85rem;
+    color:#5b6863;
+    margin-bottom:6px;
+    margin-top:14px;
+  }
+  input, textarea, select{
+    width:100%;
+    padding:12px 14px;
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    background:var(--paper);
+    font-size:0.95rem;
+    font-family:inherit;
+  }
+  textarea{ min-height:90px; resize:vertical; }
+  button{
+    width:100%;
+    margin-top:22px;
+    padding:13px;
+    border:none;
+    border-radius:var(--radius);
+    background:var(--maroon);
+    color:#fff;
+    font-size:1rem;
+    font-weight:700;
+    cursor:pointer;
+    font-family:inherit;
+  }
+  button:disabled{ background:#a9b6b2; cursor:not-allowed; }
+  #status{
+    margin-top:14px;
+    font-size:0.85rem;
+    color:#5b6863;
+    text-align:center;
+  }
+  #successBox{
+    display:none;
+    text-align:center;
+    padding:20px 0;
+  }
+  #successBox .check{ font-size:3rem; margin-bottom:10px; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="logo">مُساعِد</div>
+  <div class="tag">__CLINIC_AR__ — استمارة استقبال قبل الكشف</div>
+
+  <div id="formBox">
+    <label for="nameInput">الاسم بالكامل</label>
+    <input type="text" id="nameInput" placeholder="مثال: محمد أحمد">
+
+    <label for="phoneInput">رقم الموبايل</label>
+    <input type="tel" id="phoneInput" placeholder="مثال: 01012345678">
+
+    <label for="complaintInput">الشكوى الأساسية (السبب اللي جاي عشانه)</label>
+    <textarea id="complaintInput" placeholder="مثال: ألم في الركبة اليمين من حوالي أسبوعين"></textarea>
+
+    <label for="referralInput">عرفت عن العيادة إزاي؟</label>
+    <input type="text" id="referralInput" placeholder="مثال: صديق قاللي عليها">
+
+    <button type="button" id="submitBtn">إرسال</button>
+    <div id="status"></div>
+  </div>
+
+  <div id="successBox">
+    <div class="check">✅</div>
+    <div style="font-size:1.05rem;font-weight:600;color:var(--maroon);">تم الإرسال بنجاح</div>
+    <div style="font-size:0.85rem;color:#5b6863;margin-top:6px;">شكرًا ليك، البيانات وصلت للعيادة. نشوفك قريب!</div>
+  </div>
+</div>
+
+<script>
+const BACKEND_URL = '';
+
+document.getElementById('submitBtn').addEventListener('click', async () => {
+  const name = document.getElementById('nameInput').value.trim();
+  const phone = document.getElementById('phoneInput').value.trim();
+  const complaint = document.getElementById('complaintInput').value.trim();
+  const referral = document.getElementById('referralInput').value;
+  const statusEl = document.getElementById('status');
+  const btn = document.getElementById('submitBtn');
+
+  if(!name || !phone){
+    statusEl.textContent = 'من فضلك اكتب الاسم ورقم الموبايل.';
+    statusEl.style.color = '#a33d3d';
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = 'جاري الإرسال…';
+  statusEl.style.color = '#5b6863';
+
+  try{
+    const res = await fetch(BACKEND_URL + '/api/intake', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patientName: name, patientPhone: phone, chiefComplaint: complaint, referralSource: referral })
+    });
+    if(!res.ok) throw new Error('Server error ' + res.status);
+    document.getElementById('formBox').style.display = 'none';
+    document.getElementById('successBox').style.display = 'block';
+  }catch(e){
+    console.error(e);
+    statusEl.textContent = 'حصل خطأ أثناء الإرسال، حاول تاني.';
+    statusEl.style.color = '#a33d3d';
+    btn.disabled = false;
+  }
+});
+</script>
+
+</body>
+</html>
+`;
+
+app.get('/intake', async (req, res) => {
+  const c = await getClinicConfig();
+  const nm = clinicEsc(c.name_ar || c.name);
+  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(INTAKE_PAGE.replace(/__CLINIC_AR__/g, nm));
 });
 
 app.listen(PORT, () => {
