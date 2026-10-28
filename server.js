@@ -4881,13 +4881,14 @@ app.get('/intake', async (req, res) => {
 
 
 // ---- Public links page (like Linktree) at /links ----
+const LINKS_JS = String.raw`function cp(b){var n=b.getAttribute('data-n');var done=function(){var o=b.textContent;b.textContent='Copied \u2713';setTimeout(function(){b.textContent=o},1500)};function fb(){var t=document.createElement('textarea');t.value=n;document.body.appendChild(t);t.select();try{document.execCommand('copy')}catch(e){}document.body.removeChild(t);done()}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(n).then(done,fb)}else{fb()}}`;
 function renderLinksPage(c) {
   const nm = clinicEsc(c.name), tag = clinicEsc(c.tagline || '');
   const btn = (label, url) => '<a class="b" href="' + clinicEsc(url) + '" target="_blank" rel="noopener">' + clinicEsc(label) + '</a>';
   const rows = [];
   rows.push(btn('Book online', '/book'));
   const tel = String(c.phone || '').replace(/[^0-9+]/g, '');
-  if (tel) rows.push(btn('For Reservations', 'tel:' + tel));
+  if (tel) rows.push('<div class="b"><div>For Reservations</div><div class="ph">' + clinicEsc(String(c.phone).trim()) + '</div><div class="act"><a class="ab" href="tel:' + clinicEsc(tel) + '">Call</a><button type="button" class="ab" data-n="' + clinicEsc(String(c.phone).trim()) + '" onclick="cp(this)">Copy number</button></div></div>');
   (Array.isArray(c.links) ? c.links : []).forEach((l) => { const u = safeLinkUrl(l && l.url); if (u && l.label) rows.push(btn(l.label, u)); });
   const addr = c.address || c.address_ar || '';
   const loc = addr ? '<div class="h">&#128205; Our Location</div><a class="b loc" href="' + clinicEsc(safeLinkUrl(c.map_url) || '#') + '" target="_blank" rel="noopener">' + clinicEsc(addr) + '</a>' : '';
@@ -4895,8 +4896,8 @@ function renderLinksPage(c) {
     '<style>*{box-sizing:border-box}body{margin:0;background:#e9ecef;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#111;min-height:100vh}' +
     '.w{max-width:560px;margin:0 auto;padding:36px 16px 48px;text-align:center}.logo{width:84%;max-width:340px;height:auto;border-radius:18px;display:block;margin:10px auto 22px;box-shadow:0 2px 8px rgba(0,0,0,.12)}' +
     'h1{font-size:1.05rem;margin:0 0 26px;font-weight:600}.tag{font-size:1.15rem;margin:6px 0 30px}.b{display:block;background:#fff;border-radius:12px;padding:20px 16px;margin:0 0 14px;color:#111;text-decoration:none;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.08)}' +
-    '.b:active{transform:scale(.99)}.h{font-weight:700;margin:26px 0 12px}.loc{font-weight:500;text-align:left}</style></head><body><div class="w">' +
-    '<img class="logo" src="/clinic-logo.png" alt="' + nm + '">' + (tag ? '<p class="tag">' + tag + '</p>' : '') + rows.join('') + loc + '</div></body></html>';
+    '.ph{display:block;margin-top:6px;font-size:1.25rem;font-weight:700;letter-spacing:.5px;direction:ltr}.act{display:flex;gap:10px;margin-top:14px}.ab{flex:1;background:#eef1f4;border:0;border-radius:10px;padding:12px 8px;font:inherit;font-weight:600;color:#111;text-decoration:none;cursor:pointer;text-align:center}.b:active{transform:scale(.99)}.h{font-weight:700;margin:26px 0 12px}.loc{font-weight:500;text-align:left}</style></head><body><div class="w">' +
+    '<img class="logo" src="/clinic-logo.png" alt="' + nm + '">' + (tag ? '<p class="tag">' + tag + '</p>' : '') + rows.join('') + loc + '</div><script>' + LINKS_JS + '</script></body></html>';
 }
 app.get(['/links', '/l'], async (req, res) => {
   logActivity(req, 'page', null, 'links');
