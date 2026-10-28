@@ -4129,7 +4129,7 @@ const bookHeaders = () => ({ apikey: SUPABASE_SERVICE_KEY, Authorization: `Beare
 // ---- Clinic settings (name, address, links, message texts, payroll rules) ----
 // Stored in booking_settings row id=2 so no new table is needed. Every clinic
 // that installs the app fills these in from Settings > Clinic.
-const CLINIC_DEFAULTS = { name: 'Your Clinic', name_ar: '', address: '', address_ar: '', map_url: '', phone: '', instapay_url: '', instapay_handle: '', review_url: '', intake_url: '', templates: {}, payroll_rules: [] };
+const CLINIC_DEFAULTS = { name: 'Your Clinic', name_ar: '', address: '', address_ar: '', map_url: '', phone: '', instapay_url: '', instapay_handle: '', review_url: '', intake_url: '', tagline: '', links: [], templates: {}, payroll_rules: [] };
 let clinicCache = null, clinicCacheAt = 0;
 async function getClinicConfig(force) {
   if (!force && clinicCache && Date.now() - clinicCacheAt < 60000) return clinicCache;
@@ -4142,6 +4142,7 @@ async function getClinicConfig(force) {
   const c = { ...CLINIC_DEFAULTS, ...data };
   c.templates = data.templates && typeof data.templates === 'object' ? data.templates : {};
   c.payroll_rules = Array.isArray(data.payroll_rules) ? data.payroll_rules : [];
+  c.links = Array.isArray(data.links) ? data.links : [];
   if (!String(c.name || '').trim()) c.name = CLINIC_DEFAULTS.name;
   clinicCache = c; clinicCacheAt = Date.now();
   PAYROLL_RULES = c.payroll_rules;
@@ -4153,6 +4154,8 @@ function renderClinicPage(html, c) {
   return html.replace(/__ADDR_EN__/g, clinicJs(clinicEsc(c.address))).replace(/__ADDR_AR__/g, clinicJs(clinicEsc(c.address_ar || c.address)))
     .replace(/__MAP_URL__/g, clinicEsc(c.map_url || '#')).replace(/Empower/g, clinicEsc(c.name));
 }
+const safeLinkUrl = (u) => { const t = String(u == null ? '' : u).trim().slice(0, 300); return /^(https?:\/\/|tel:|mailto:)/i.test(t) ? t : ''; };
+const cleanLinks = (arr) => (Array.isArray(arr) ? arr : []).slice(0, 12).map((l) => ({ label: clinicText(l && l.label, 60).trim(), url: safeLinkUrl(l && l.url) })).filter((l) => l.label && l.url);
 const clinicText = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u0009\u000b-\u001f]/g, ' ').slice(0, n);
 app.get('/api/clinic-config', requireApprovedAny, async (req, res) => {
   try {
@@ -4183,7 +4186,7 @@ app.put('/api/clinic-config', requireOwnerDoctor, async (req, res) => {
     name: clinicText(b.name, 80).trim() || CLINIC_DEFAULTS.name, name_ar: clinicText(b.name_ar, 80).trim(),
     address: clinicText(b.address, 200).trim(), address_ar: clinicText(b.address_ar, 200).trim(), map_url: clinicText(b.map_url, 300).trim(),
     phone: clinicText(b.phone, 30).trim(), instapay_url: clinicText(b.instapay_url, 300).trim(), instapay_handle: clinicText(b.instapay_handle, 100).trim(),
-    review_url: clinicText(b.review_url, 300).trim(), intake_url: clinicText(b.intake_url, 300).trim(), templates, payroll_rules: rules,
+    review_url: clinicText(b.review_url, 300).trim(), intake_url: clinicText(b.intake_url, 300).trim(), tagline: clinicText(b.tagline, 120).trim(), links: cleanLinks(b.links), templates, payroll_rules: rules,
   };
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?on_conflict=id`, { method: 'POST', headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ id: 2, data, updated_at: new Date().toISOString() }) });
@@ -4874,6 +4877,30 @@ app.get('/intake', async (req, res) => {
   const c = await getClinicConfig();
   const nm = clinicEsc(c.name_ar || c.name);
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(INTAKE_PAGE.replace(/__CLINIC_AR__/g, nm));
+});
+
+
+// ---- Public links page (like Linktree) at /links ----
+function renderLinksPage(c) {
+  const nm = clinicEsc(c.name), tag = clinicEsc(c.tagline || '');
+  const btn = (label, url) => '<a class="b" href="' + clinicEsc(url) + '" target="_blank" rel="noopener">' + clinicEsc(label) + '</a>';
+  const rows = [];
+  rows.push(btn('Book online', '/book'));
+  const tel = String(c.phone || '').replace(/[^0-9+]/g, '');
+  if (tel) rows.push(btn('For Reservations', 'tel:' + tel));
+  (Array.isArray(c.links) ? c.links : []).forEach((l) => { const u = safeLinkUrl(l && l.url); if (u && l.label) rows.push(btn(l.label, u)); });
+  const addr = c.address || c.address_ar || '';
+  const loc = addr ? '<div class="h">&#128205; Our Location</div><a class="b loc" href="' + clinicEsc(safeLinkUrl(c.map_url) || '#') + '" target="_blank" rel="noopener">' + clinicEsc(addr) + '</a>' : '';
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + nm + '</title>' +
+    '<style>*{box-sizing:border-box}body{margin:0;background:#e9ecef;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#111;min-height:100vh}' +
+    '.w{max-width:560px;margin:0 auto;padding:36px 16px 48px;text-align:center}.logo{width:150px;height:150px;border-radius:50%;object-fit:cover;background:#1f2b3d;display:block;margin:10px auto 22px}' +
+    'h1{font-size:1.05rem;margin:0 0 26px;font-weight:600}.tag{font-size:1.15rem;margin:0 0 28px}.b{display:block;background:#fff;border-radius:12px;padding:20px 16px;margin:0 0 14px;color:#111;text-decoration:none;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.08)}' +
+    '.b:active{transform:scale(.99)}.h{font-weight:700;margin:26px 0 12px}.loc{font-weight:500;text-align:left}</style></head><body><div class="w">' +
+    '<img class="logo" src="/clinic-logo.png" alt="' + nm + '"><h1>' + nm + '</h1>' + (tag ? '<p class="tag">' + tag + '</p>' : '') + rows.join('') + loc + '</div></body></html>';
+}
+app.get(['/links', '/l'], async (req, res) => {
+  logActivity(req, 'page', null, 'links');
+  res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }).send(renderLinksPage(await getClinicConfig()));
 });
 
 app.listen(PORT, () => {
