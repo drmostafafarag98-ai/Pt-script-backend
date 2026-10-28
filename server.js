@@ -4894,9 +4894,9 @@ function renderLinksPage(c) {
   return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + nm + '</title>' +
     '<style>*{box-sizing:border-box}body{margin:0;background:#e9ecef;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#111;min-height:100vh}' +
     '.w{max-width:560px;margin:0 auto;padding:36px 16px 48px;text-align:center}.logo{width:84%;max-width:340px;height:auto;border-radius:18px;display:block;margin:10px auto 22px;box-shadow:0 2px 8px rgba(0,0,0,.12)}' +
-    'h1{font-size:1.05rem;margin:0 0 26px;font-weight:600}.tag{font-size:1.15rem;margin:0 0 28px}.b{display:block;background:#fff;border-radius:12px;padding:20px 16px;margin:0 0 14px;color:#111;text-decoration:none;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.08)}' +
+    'h1{font-size:1.05rem;margin:0 0 26px;font-weight:600}.tag{font-size:1.15rem;margin:6px 0 30px}.b{display:block;background:#fff;border-radius:12px;padding:20px 16px;margin:0 0 14px;color:#111;text-decoration:none;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.08)}' +
     '.b:active{transform:scale(.99)}.h{font-weight:700;margin:26px 0 12px}.loc{font-weight:500;text-align:left}</style></head><body><div class="w">' +
-    '<img class="logo" src="/clinic-logo.png" alt="' + nm + '"><h1>' + nm + '</h1>' + (tag ? '<p class="tag">' + tag + '</p>' : '') + rows.join('') + loc + '</div></body></html>';
+    '<img class="logo" src="/clinic-logo.png" alt="' + nm + '">' + (tag ? '<p class="tag">' + tag + '</p>' : '') + rows.join('') + loc + '</div></body></html>';
 }
 app.get(['/links', '/l'], async (req, res) => {
   logActivity(req, 'page', null, 'links');
