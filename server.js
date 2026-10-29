@@ -1619,7 +1619,7 @@ app.get('/api/appointments/undocumented', requireApprovedDoctor, async (req, res
     const documented = new Set((Array.isArray(ses) ? ses : []).map(x => String(x.patient_name || '').trim().toLowerCase()));
     res.json(due
       .filter(a => !documented.has(String(a.patient_name || '').trim().toLowerCase()))
-      .map(a => ({ id: a.id, patient_name: a.patient_name, start_time: a.start_time, visit_type: a.visit_type || null, doctor_name: a.doctor_name || null, arrived_at: a.arrived_at || null })));
+      .map(a => ({ id: a.id, patient_name: a.patient_name, start_time: a.start_time, end_time: a.end_time || null, visit_type: a.visit_type || null, doctor_name: a.doctor_name || null, arrived_at: a.arrived_at || null })));
   } catch (err) {
     console.error('Undocumented visits error:', err);
     res.status(500).json({ error: 'Failed: ' + err.message });
