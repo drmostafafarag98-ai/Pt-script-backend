@@ -4928,6 +4928,13 @@ app.get(['/links', '/l'], async (req, res) => {
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }).send(renderLinksPage(await getClinicConfig()));
 });
 
+// Keep-alive: a tiny daily database request so a free Supabase project is never paused for inactivity
+if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
+  const dbKeepAlive = () => fetch(`${SUPABASE_URL}/rest/v1/booking_settings?select=id&limit=1`, { headers: bookHeaders() }).catch(() => {});
+  setTimeout(dbKeepAlive, 60000);
+  setInterval(dbKeepAlive, 12 * 3600000);
+}
+
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
