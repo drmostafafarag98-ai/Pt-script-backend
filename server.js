@@ -4317,6 +4317,24 @@ app.get('/api/book/slots', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Could not load times.' }); }
 });
 
+app.get('/api/book/availability', async (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (bookRateLimited(ip, 'avail', 40, 600000)) return res.status(429).json({ error: 'Too many requests. Please wait a moment.' });
+  try {
+    if (String(req.query.phone || '').replace(/\D/g, '').length < 10) return res.json({ days: [] });
+    const s = await getBookingSettings();
+    if (!s.enabled) return res.json({ days: [] });
+    const doc = (await bookableDoctors(s)).find(d => bookDocToken(d.email) === String(req.query.doctor || ''));
+    if (!doc || bookBlockedByGender(s, doc.email, String(req.query.gender || ''))) return res.json({ days: [] });
+    const base = new Date(cairoTodayYmd() + 'T12:00:00Z');
+    const n = Math.min(Number(s.max_days_ahead) || 14, 14);
+    const list = [];
+    for (let i = 0; i <= n; i++) list.push(new Date(base.getTime() + i * 86400000).toISOString().slice(0, 10));
+    const all = await Promise.all(list.map(async d => ({ date: d, times: await computeBookingSlots(s, doc, d).catch(() => []) })));
+    res.set('Cache-Control', 'no-store').json({ days: all.filter(x => x.times.length) });
+  } catch (err) { res.status(500).json({ error: 'Could not load times.' }); }
+});
+
 app.post('/api/book', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Booking is not available right now.' });
   const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
@@ -4568,9 +4586,9 @@ a{color:var(--gold);font-weight:600}
 <div id="form" style="display:none">
 <div class="card"><h2 id="hType"></h2><div class="opts" id="types"></div></div>
 <div class="card"><h2 id="hDoc"></h2><div class="chips" id="docs"></div>
-<label id="lDate" style="margin-top:18px"></label><div class="days" id="days"></div>
-<label id="lOther" style="margin-top:12px"></label><input type="date" id="date">
-<label id="lTime" style="margin-top:18px"></label><div class="slots" id="slots"></div></div>
+<label id="lDate" style="display:none"></label><div class="days" id="days" style="display:none"></div>
+<label id="lOther" style="display:none"></label><input type="date" id="date" style="display:none">
+<label id="lTime" style="margin-top:18px"></label><div id="avail"></div><div class="slots" id="slots" style="display:none"></div></div>
 <div class="card"><h2 id="hPay"></h2><div class="dep" id="depBox"></div>
 <div id="shotWrap" style="margin-top:14px"><label class="up"><span id="upTxt"></span><input type="file" id="shot" accept="image/*"><img id="prev" alt=""></label></div></div>
 <div class="err" id="err"></div>
@@ -4581,11 +4599,11 @@ var gender='',cfg=null,chosenTime='',chosenType='',chosenDoc='',shotData=null,sh
 try{lang=localStorage.getItem('bl')||((navigator.language||'').toLowerCase().indexOf('en')===0?'en':'ar')}catch(e){}
 var T={
  /*docs*/
- en:{title:'Book an appointment',sub0:'Loading…',subClosed:'Online booking is not open right now. Please contact the clinic on WhatsApp.',sub1:'Enter your details to start.',sub2:'Choose your visit, doctor and time.',lName:'Full name',lPhone:'Phone number (WhatsApp)',lGender:'Gender',gMale:'Male',gFemale:'Female',eGender:'Please choose your gender.',noDocs:'No doctors are available for this visit type.',next:'Continue',hType:'1. Visit type',hDoc:'2. Doctor & time',lDate:'Day',lOther:'Or pick another date',lTime:'Available times',hPay:'3. Deposit to confirm',go:'Confirm booking',booking:'Booking…',pickDoc:'Choose a doctor and a day to see times.',loading:'Loading…',noTimes:'No available times that day. Try another day.',timesFail:'Could not load times.',
+ en:{title:'Book an appointment',sub0:'Loading…',pickDay:'Choose a day to see the times.',subClosed:'Online booking is not open right now. Please contact the clinic on WhatsApp.',sub1:'Enter your details to start.',sub2:'Choose your visit, doctor and time.',lName:'Full name',lPhone:'Phone number (WhatsApp)',lGender:'Gender',gMale:'Male',gFemale:'Female',eGender:'Please choose your gender.',noDocs:'No doctors are available for this visit type.',next:'Continue',hType:'1. Visit type',hDoc:'2. Doctor & time',lDate:'Day',lOther:'Or pick another date',lTime:'Available times',hPay:'3. Deposit to confirm',go:'Confirm booking',booking:'Booking…',pickDoc:'Choose a doctor and a day to see times.',loading:'Loading…',noTimes:'No available times that day. Try another day.',timesFail:'Could not load times.',
   dep1:'Deposit',dep2:'half of the fee ({p} EGP). It is non-refundable and is deducted from your fee at the clinic.',dep3:'Transfer by InstaPay to:',copy:'Copy',openpay:'Open InstaPay link',copied:'Copied ✓',dep4:'Then upload the transfer screenshot below.',dep5:'Have an active package with us? Skip the screenshot — no deposit needed.',up:'Tap to upload the transfer screenshot',upDone:'Tap to change the screenshot',
   eName:'Please enter your full name.',ePhone:'Please enter a valid phone number.',eDoc:'Please choose a doctor.',eTime:'Please choose a day and a time.',eImg:'Please choose an image file.',eConn:'Connection problem. Please try again.',eNA:'Booking is not available right now.',
   done:'Your booking is confirmed',pkg:'Your active package covers this visit.',depRec:'Deposit received: {d} EGP (non-refundable, deducted from your fee).',addr:'__ADDR_EN__',map:'Open the location on the map',arrive:'Please arrive 5 minutes early. To change the time, contact the clinic on WhatsApp at least 5 hours before.',dr:'Dr. ',egp:'EGP',at:'at',other:'العربية'},
- ar:{title:'احجز ميعادك',sub0:'جاري التحميل…',subClosed:'الحجز الأونلاين مقفول دلوقتي. من فضلك كلّم العيادة على واتساب.',sub1:'اكتب بياناتك عشان تبدأ.',sub2:'اختار نوع الزيارة والدكتور والميعاد.',lName:'الاسم بالكامل',lPhone:'رقم التليفون (واتساب)',lGender:'النوع',gMale:'ذكر',gFemale:'أنثى',eGender:'من فضلك اختار النوع.',noDocs:'مفيش دكاترة متاحين لنوع الزيارة ده.',next:'متابعة',hType:'١. نوع الزيارة',hDoc:'٢. الدكتور والميعاد',lDate:'اليوم',lOther:'أو اختار تاريخ تاني',lTime:'المواعيد المتاحة',hPay:'٣. العربون لتأكيد الحجز',go:'تأكيد الحجز',booking:'جاري الحجز…',pickDoc:'اختار الدكتور واليوم عشان تشوف المواعيد.',loading:'جاري التحميل…',noTimes:'مفيش مواعيد متاحة اليوم ده. جرّب يوم تاني.',timesFail:'مقدرناش نحمّل المواعيد.',
+ ar:{title:'احجز ميعادك',sub0:'جاري التحميل…',pickDay:'اختار اليوم عشان تشوف المواعيد.',subClosed:'الحجز الأونلاين مقفول دلوقتي. من فضلك كلّم العيادة على واتساب.',sub1:'اكتب بياناتك عشان تبدأ.',sub2:'اختار نوع الزيارة والدكتور والميعاد.',lName:'الاسم بالكامل',lPhone:'رقم التليفون (واتساب)',lGender:'النوع',gMale:'ذكر',gFemale:'أنثى',eGender:'من فضلك اختار النوع.',noDocs:'مفيش دكاترة متاحين لنوع الزيارة ده.',next:'متابعة',hType:'١. نوع الزيارة',hDoc:'٢. الدكتور والميعاد',lDate:'اليوم',lOther:'أو اختار تاريخ تاني',lTime:'المواعيد المتاحة',hPay:'٣. العربون لتأكيد الحجز',go:'تأكيد الحجز',booking:'جاري الحجز…',pickDoc:'اختار الدكتور واليوم عشان تشوف المواعيد.',loading:'جاري التحميل…',noTimes:'مفيش مواعيد متاحة اليوم ده. جرّب يوم تاني.',timesFail:'مقدرناش نحمّل المواعيد.',
   dep1:'العربون',dep2:'نص السعر ({p} جنيه). العربون غير مسترد ويتخصم من الحساب في العيادة.',dep3:'حوّل بـ InstaPay على:',openpay:'افتح لينك InstaPay',copy:'نسخ',copied:'تم النسخ ✓',dep4:'وبعدين ارفع صورة التحويل تحت.',dep5:'عندك باكدج شغال معانا؟ سيب صورة التحويل فاضية، مش محتاج عربون.',up:'اضغط لرفع صورة التحويل',upDone:'اضغط لتغيير الصورة',
   eName:'من فضلك اكتب اسمك بالكامل.',ePhone:'من فضلك اكتب رقم تليفون صحيح.',eDoc:'من فضلك اختار الدكتور.',eTime:'من فضلك اختار اليوم والميعاد.',eImg:'من فضلك اختار ملف صورة.',eConn:'فيه مشكلة في الاتصال. جرّب تاني.',eNA:'الحجز مش متاح دلوقتي.',
   done:'تم تأكيد حجزك',pkg:'الباكدج بتاعك بيغطي الزيارة دي.',depRec:'تم استلام العربون: {d} جنيه (غير مسترد ويتخصم من الحساب).',addr:'__ADDR_AR__',map:'افتح الموقع على الخريطة',arrive:'من فضلك تعالى قبل الميعاد بـ 5 دقايق. لو عايز تغيّر الميعاد كلّم العيادة على واتساب قبلها بـ 5 ساعات على الأقل.',dr:'Dr. ',egp:'جنيه',at:'الساعة',other:'EN'}
@@ -4623,7 +4641,7 @@ function applyLang(){
   $('go').textContent=$('go').disabled?t('booking'):t('go');
   $('upTxt').textContent=shotData?t('upDone'):t('up');
   if(!cfg){ $('sub').textContent=t('sub0'); } else if(!cfg.enabled){ $('sub').textContent=t('subClosed'); } else if(cfg.locked){ $('sub').textContent=t('sub1'); } else { $('sub').textContent=t('sub2'); }
-  if(cfg&&!cfg.locked&&cfg.enabled){ renderTypes(); renderDocs(); renderDays(); depText(); if(chosenDoc&&$('date').value) loadSlots(); else $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('pickDoc')+'</div>'; }
+  if(cfg&&!cfg.locked&&cfg.enabled){ renderTypes(); renderDocs(); renderDays(); depText(); if(chosenDoc) loadSlots(); else $('avail').innerHTML='<div class="hint">'+t('pickDoc')+'</div>'; }
 }
 $('langBtn').onclick=function(){ lang=lang==='ar'?'en':'ar'; try{localStorage.setItem('bl',lang)}catch(e){} applyLang(); };
 function tLabel(x){ if(lang==='ar'){ if(x.label_ar) return x.label_ar; var l=x.label||''; if(/check-?up/i.test(l)) return 'Check-up — كشف (جلسة تقييمية)'; if(/(1|one)\s*body\s*part/i.test(l)) return 'جلسة — على مكان واحد (عضو واحد)'; if(/(2|two)\s*body\s*parts?/i.test(l)) return 'جلسة — على أكتر من مكان (عضوين)'; } return l||x.label; }
@@ -4641,14 +4659,20 @@ function renderDays(){ var n=Math.min(cfg.max_days_ahead,14),h='',now=new Date()
 function depText(){ var x=typeObj(); if(!x){ $('depBox').innerHTML='<div class="hint">'+t('hType')+'</div>'; return; }
   $('depBox').innerHTML='<div>'+t('dep1')+'</div><div class="big">'+num(x.deposit)+' '+t('egp')+'</div><div>'+t('dep2',{p:num(x.price)})+'</div>'+(cfg.instapay?'<div style="margin-top:10px">'+t('dep3')+'</div><div class="acct"><span>'+esc(cfg.instapay)+'</span>'+(/^https?:\/\//i.test(cfg.instapay)?'<a class="openlink" href="'+esc(cfg.instapay)+'" target="_blank" rel="noopener">'+t('openpay')+'</a>':'')+'<button type="button" class="copy" id="cpy">'+t('copy')+'</button></div>':'')+(cfg.note?'<div>'+esc(cfg.note)+'</div>':'')+'<div style="margin-top:8px">'+t('dep4')+'</div><div class="hint" style="margin-top:6px">'+t('dep5')+'</div>';
   var c=$('cpy'); if(c)c.onclick=function(){ var done=function(){c.textContent=t('copied')}; try{ navigator.clipboard.writeText(cfg.instapay).then(done,function(){ var ta=document.createElement('textarea'); ta.value=cfg.instapay; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');done()}catch(e){} ta.remove(); }); }catch(e){ var ta=document.createElement('textarea'); ta.value=cfg.instapay; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');done()}catch(x){} ta.remove(); } }; }
-function loadSlots(){ chosenTime=''; var dt=$('date').value;
-  if(!chosenDoc||!dt){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('pickDoc')+'</div>'; return; }
-  $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('loading')+'</div>';
-  fetch('/api/book/slots?doctor='+encodeURIComponent(chosenDoc)+'&date='+dt+'&gender='+gender+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(j){
-    if(!j.times||!j.times.length){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('noTimes')+'</div>'; return; }
-    $('slots').innerHTML=j.times.map(function(x){return '<button type="button" class="slot" data-t="'+x+'">'+fmtTime(x)+'</button>'}).join('');
-    Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(b){ b.onclick=function(){ chosenTime=b.dataset.t; Array.prototype.forEach.call($('slots').querySelectorAll('.slot'),function(x){x.classList.toggle('on',x===b)}); }; });
-  }).catch(function(){ $('slots').innerHTML='<div class="hint" style="grid-column:1/-1">'+t('timesFail')+'</div>'; }); }
+function loadSlots(){ chosenTime=''; $('date').value='';
+  if(!chosenDoc){ $('avail').innerHTML='<div class="hint">'+t('pickDoc')+'</div>'; return; }
+  var my=chosenDoc; $('avail').innerHTML='<div class="hint">'+t('loading')+'</div>';
+  fetch('/api/book/availability?doctor='+encodeURIComponent(chosenDoc)+'&gender='+gender+'&phone='+encodeURIComponent($('phone').value)).then(function(r){return r.json()}).then(function(j){
+    if(my!==chosenDoc) return;
+    if(!j.days||!j.days.length){ $('avail').innerHTML='<div class="hint">'+t('noTimes')+'</div>'; return; }
+    var D=j.days; var cur='';
+    function fl(d){ var dt=new Date(d.date+'T12:00:00'),L=lang==='ar'?'ar-EG':'en-GB'; return '<button type="button" class="day'+(d.date===cur?' on':'')+'" data-y="'+d.date+'"><span>'+dt.toLocaleDateString(L,{weekday:'short'})+'</span><b>'+num(dt.getDate())+'</b><span>'+dt.toLocaleDateString(L,{month:'short'})+'</span></button>'; }
+    function draw(){ var sel=D.filter(function(d){return d.date===cur})[0];
+      $('avail').innerHTML='<div class="days">'+D.map(fl).join('')+'</div><div class="slots" style="margin-top:14px">'+(sel?sel.times.map(function(x){return '<button type="button" class="slot'+(x===chosenTime?' on':'')+'" data-t="'+x+'">'+fmtTime(x)+'</button>'}).join(''):'<div class="hint" style="grid-column:1/-1">'+t('pickDay')+'</div>')+'</div>';
+      Array.prototype.forEach.call($('avail').querySelectorAll('.day'),function(b){ b.onclick=function(){ cur=b.dataset.y; $('date').value=cur; chosenTime=''; draw(); }; });
+      Array.prototype.forEach.call($('avail').querySelectorAll('.slot'),function(b){ b.onclick=function(){ chosenTime=b.dataset.t; draw(); }; }); }
+    draw();
+  }).catch(function(){ $('avail').innerHTML='<div class="hint">'+t('timesFail')+'</div>'; }); }
 function init(){ applyLang(); fetch('/api/book/config').then(function(r){return r.json()}).then(function(c){ cfg=c; if(!c.enabled){ applyLang(); return; } $('step1').style.display='block'; applyLang(); }).catch(function(){ $('sub').textContent=t('eNA'); }); }
 $('next').onclick=function(){ $('err1').textContent='';
   if($('name').value.trim().length<3) return $('err1').textContent=t('eName');
