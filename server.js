@@ -696,7 +696,9 @@ app.get('/api/transfers', requireFinanceAccess, async (req, res) => {
 
 app.post('/api/transfers', requireFinanceAccess, async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return res.status(500).json({ error: 'Server is missing SUPABASE_URL or SUPABASE_SERVICE_KEY.' });
-  const { amount, fromMethod, toMethod, transferDate, note } = req.body || {};
+  const { amount, fromMethod, toMethod, transferDate, note, doctorName } = req.body || {};
+  const trDoctor = String(doctorName || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 80);
+  if (!trDoctor) return res.status(400).json({ error: 'Please write which doctor took or sent the money.' });
   if (!amount || !fromMethod || !toMethod) return res.status(400).json({ error: 'Missing amount, fromMethod, or toMethod.' });
   if (fromMethod === toMethod) return res.status(400).json({ error: 'fromMethod and toMethod must differ.' });
   try {
@@ -714,6 +716,7 @@ app.post('/api/transfers', requireFinanceAccess, async (req, res) => {
         to_method: toMethod,
         transfer_date: transferDate || new Date().toISOString().slice(0, 10),
         note: note || null,
+        doctor_name: trDoctor,
         created_by: req.doctor.name || req.doctor.email,
       }),
     });
