@@ -4996,7 +4996,7 @@ app.get('/pay', async (req, res) => {
 
 // ---- HR: leave decisions (owner only) ----
 // "unavailable" days from the calendar count as leave automatically; this table stores what the owner decides
-// for scheduled days with no patients: kind = leave | worked | closed.
+// for scheduled days with no patients: kind = leave | worked | closed, and for days off worked: overtime | no_overtime (+ optional hours).
 app.get('/api/hr/leaves', requireOwnerDoctor, async (req, res) => {
   try {
     const { start, end } = req.query;
@@ -5009,10 +5009,11 @@ app.get('/api/hr/leaves', requireOwnerDoctor, async (req, res) => {
 app.post('/api/hr/leaves', requireOwnerDoctor, async (req, res) => {
   const b = req.body || {};
   const name = clinicText(b.doctorName, 80).trim(), date = String(b.date || '');
-  const kind = ['leave', 'worked', 'closed'].includes(b.kind) ? b.kind : '';
+  const kind = ['leave', 'worked', 'closed', 'overtime', 'no_overtime'].includes(b.kind) ? b.kind : '';
+  const hoursNum = parseFloat(b.hours); const hours = Number.isFinite(hoursNum) && hoursNum > 0 && hoursNum <= 24 ? hoursNum : null;
   if (!name || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !kind) return res.status(400).json({ error: 'Missing doctor, date or kind.' });
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/doctor_leaves?on_conflict=doctor_name,date`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'return=representation,resolution=merge-duplicates' }, body: JSON.stringify({ doctor_name: name, date, kind, note: clinicText(b.note, 200).trim() || null, created_by: req.doctor.name || req.doctor.email }) });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/doctor_leaves?on_conflict=doctor_name,date`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'return=representation,resolution=merge-duplicates' }, body: JSON.stringify({ doctor_name: name, date, kind, hours, note: clinicText(b.note, 200).trim() || null, created_by: req.doctor.name || req.doctor.email }) });
     const j = await r.json();
     if (!r.ok) throw new Error(JSON.stringify(j));
     res.json(Array.isArray(j) ? j[0] : j);
