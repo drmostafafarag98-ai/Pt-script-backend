@@ -4142,7 +4142,7 @@ const bookHeaders = () => ({ apikey: SUPABASE_SERVICE_KEY, Authorization: `Beare
 // ---- Clinic settings (name, address, links, message texts, payroll rules) ----
 // Stored in booking_settings row id=2 so no new table is needed. Every clinic
 // that installs the app fills these in from Settings > Clinic.
-const CLINIC_DEFAULTS = { name: 'Your Clinic', name_ar: '', address: '', address_ar: '', map_url: '', phone: '', instapay_url: '', instapay_handle: '', review_url: '', intake_url: '', tagline: '', logo: '', stamp: '', links: [], templates: {}, payroll_rules: [] };
+const CLINIC_DEFAULTS = { name: 'Your Clinic', name_ar: '', address: '', address_ar: '', map_url: '', phone: '', instapay_url: '', instapay_handle: '', review_url: '', intake_url: '', tagline: '', logo: '', stamp: '', fixed_costs: [], hr_staff: [], hr_start: '', links: [], templates: {}, payroll_rules: [] };
 let clinicCache = null, clinicCacheAt = 0;
 async function getClinicConfig(force) {
   if (!force && clinicCache && Date.now() - clinicCacheAt < 60000) return clinicCache;
@@ -4156,6 +4156,9 @@ async function getClinicConfig(force) {
   c.templates = data.templates && typeof data.templates === 'object' ? data.templates : {};
   c.payroll_rules = Array.isArray(data.payroll_rules) ? data.payroll_rules : [];
   c.links = Array.isArray(data.links) ? data.links : [];
+  c.fixed_costs = cleanFixedCosts(data.fixed_costs);
+  c.hr_staff = cleanHrStaff(data.hr_staff);
+  c.hr_start = /^\d{4}-\d{2}-\d{2}$/.test(String(data.hr_start || '')) ? data.hr_start : '';
   if (!String(c.name || '').trim()) c.name = CLINIC_DEFAULTS.name;
   clinicCache = c; clinicCacheAt = Date.now();
   PAYROLL_RULES = c.payroll_rules;
@@ -4178,6 +4181,18 @@ app.get('/api/clinic-config', requireApprovedAny, async (req, res) => {
     res.json(out);
   } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
 });
+const cleanFixedCosts = (arr) => (Array.isArray(arr) ? arr : []).slice(0, 30).map((f) => {
+  const name = clinicText(f && f.name, 60).trim(); const amount = parseFloat(f && f.amount);
+  if (!name || !Number.isFinite(amount) || amount <= 0) return null;
+  return { name, amount: Math.round(amount * 100) / 100, method: f.method === 'instapay' ? 'instapay' : 'cash' };
+}).filter(Boolean);
+const cleanHrStaff = (arr) => (Array.isArray(arr) ? arr : []).slice(0, 40).map((x) => {
+  const label = clinicText(x && x.label, 60).trim(), keyword = clinicText(x && x.keyword, 40).trim().toLowerCase();
+  if (!label || !keyword) return null;
+  const days = [...new Set((Array.isArray(x.days) ? x.days : []).map((d) => parseInt(d, 10)).filter((d) => d >= 0 && d <= 6))].sort();
+  const allowance = Math.max(0, Math.min(366, parseFloat(x.allowance) || 0));
+  return { label, keyword, days, allowance };
+}).filter(Boolean);
 const cleanDataImg = (v) => { const t = String(v || ''); return t.length <= 400000 && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+\/=]+$/.test(t) ? t : ''; };
 app.put('/api/clinic-config', requireOwnerDoctor, async (req, res) => {
   const b = req.body || {};
@@ -4200,7 +4215,7 @@ app.put('/api/clinic-config', requireOwnerDoctor, async (req, res) => {
     name: clinicText(b.name, 80).trim() || CLINIC_DEFAULTS.name, name_ar: clinicText(b.name_ar, 80).trim(),
     address: clinicText(b.address, 200).trim(), address_ar: clinicText(b.address_ar, 200).trim(), map_url: clinicText(b.map_url, 300).trim(),
     phone: clinicText(b.phone, 30).trim(), instapay_url: clinicText(b.instapay_url, 300).trim(), instapay_handle: clinicText(b.instapay_handle, 100).trim(),
-    review_url: clinicText(b.review_url, 300).trim(), intake_url: clinicText(b.intake_url, 300).trim(), tagline: clinicText(b.tagline, 120).trim(), logo: cleanDataImg(b.logo), stamp: cleanDataImg(b.stamp), links: cleanLinks(b.links), templates, payroll_rules: rules,
+    review_url: clinicText(b.review_url, 300).trim(), intake_url: clinicText(b.intake_url, 300).trim(), tagline: clinicText(b.tagline, 120).trim(), logo: cleanDataImg(b.logo), stamp: cleanDataImg(b.stamp), fixed_costs: cleanFixedCosts(b.fixed_costs), hr_staff: cleanHrStaff(b.hr_staff), hr_start: /^\d{4}-\d{2}-\d{2}$/.test(String(b.hr_start || '')) ? b.hr_start : '', links: cleanLinks(b.links), templates, payroll_rules: rules,
   };
   try {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/booking_settings?on_conflict=id`, { method: 'POST', headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ id: 2, data, updated_at: new Date().toISOString() }) });
@@ -4977,6 +4992,76 @@ app.get('/pay', async (req, res) => {
     '<div class="ft">' + nm + (addr ? '<br>' + addr : '') + '</div></div><script>' + LINKS_JS + '</script></body></html>';
   res.set({ 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' }).send(html);
 });
+
+
+// ---- HR: leave decisions (owner only) ----
+// "unavailable" days from the calendar count as leave automatically; this table stores what the owner decides
+// for scheduled days with no patients: kind = leave | worked | closed.
+app.get('/api/hr/leaves', requireOwnerDoctor, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    let url = `${SUPABASE_URL}/rest/v1/doctor_leaves?order=date.asc&limit=5000`;
+    if (start && end) url += `&date=gte.${encodeURIComponent(start)}&date=lte.${encodeURIComponent(end)}`;
+    const r = await fetch(url, { headers: bookHeaders() });
+    res.status(r.status).type('application/json').send(await r.text());
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+app.post('/api/hr/leaves', requireOwnerDoctor, async (req, res) => {
+  const b = req.body || {};
+  const name = clinicText(b.doctorName, 80).trim(), date = String(b.date || '');
+  const kind = ['leave', 'worked', 'closed'].includes(b.kind) ? b.kind : '';
+  if (!name || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !kind) return res.status(400).json({ error: 'Missing doctor, date or kind.' });
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/doctor_leaves?on_conflict=doctor_name,date`, { method: 'POST', headers: { ...bookHeaders(), 'Content-Type': 'application/json', Prefer: 'return=representation,resolution=merge-duplicates' }, body: JSON.stringify({ doctor_name: name, date, kind, note: clinicText(b.note, 200).trim() || null, created_by: req.doctor.name || req.doctor.email }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(JSON.stringify(j));
+    res.json(Array.isArray(j) ? j[0] : j);
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+app.delete('/api/hr/leaves/:id', requireOwnerDoctor, async (req, res) => {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/doctor_leaves?id=eq.${encodeURIComponent(req.params.id)}`, { method: 'DELETE', headers: bookHeaders() });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+
+// ---- Fixed monthly costs (rent, doorman...) -> added to Expenses once per month ----
+// Each cost is added as a normal expense dated the LAST DAY of the month, described "Fixed: <name>".
+// Payroll, Net Cash and Net InstaPay then count it like any other expense. Adding twice is safe.
+async function applyFixedCostsForMonth(ym, createdBy) {
+  const c = await getClinicConfig(true);
+  const list = c.fixed_costs || [];
+  if (!list.length || !/^\d{4}-\d{2}$/.test(ym)) return { added: 0, total: list.length };
+  const [y, m] = ym.split('-').map(Number);
+  const first = `${ym}-01`, lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const last = `${ym}-${String(lastDay).padStart(2, '0')}`;
+  const h = { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' };
+  const er = await fetch(`${SUPABASE_URL}/rest/v1/expenses?select=description&expense_date=gte.${first}&expense_date=lte.${last}&description=like.Fixed:*`, { headers: h });
+  const existing = new Set((await er.json().catch(() => [])).map((e) => String(e.description || '').toLowerCase()));
+  let added = 0;
+  for (const f of list) {
+    const desc = `Fixed: ${f.name}`;
+    if (existing.has(desc.toLowerCase())) continue;
+    const ir = await fetch(`${SUPABASE_URL}/rest/v1/expenses`, { method: 'POST', headers: h, body: JSON.stringify({ description: desc, amount: f.amount, expense_date: last, payment_method: f.method === 'instapay' ? 'instapay' : 'cash', created_by: createdBy || 'Fixed costs (auto)' }) });
+    if (ir.ok) added++; else console.error('fixed cost insert failed', ir.status, await ir.text().catch(() => ''));
+  }
+  return { added, total: list.length };
+}
+app.post('/api/fixed-costs/apply', requireFinanceAccess, async (req, res) => {
+  try {
+    const ym = String((req.body && req.body.month) || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'Bad month.' });
+    res.json(await applyFixedCostsForMonth(ym, req.doctor.name || req.doctor.email));
+  } catch (err) { res.status(500).json({ error: 'Failed: ' + err.message }); }
+});
+async function autoFixedCosts() {
+  try {
+    const today = cairoTodayYmd();
+    const tomorrow = new Date(Date.parse(today + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+    if (tomorrow.slice(0, 7) !== today.slice(0, 7)) await applyFixedCostsForMonth(today.slice(0, 7), 'Fixed costs (auto)');
+  } catch (e) { console.error('auto fixed costs failed', e.message); }
+}
+if (SUPABASE_URL && SUPABASE_SERVICE_KEY) { setTimeout(autoFixedCosts, 120000); setInterval(autoFixedCosts, 3 * 3600000); }
 
 // Keep-alive: a tiny daily database request so a free Supabase project is never paused for inactivity
 if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
